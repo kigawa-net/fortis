@@ -1,13 +1,9 @@
 plugins {
-    kotlin("multiplatform") version "2.1.0"
-}
-
-repositories {
-    mavenCentral()
+    kotlin("multiplatform") version "2.3.20"
 }
 
 kotlin {
-    macosX64("macos") {
+    macosArm64("macos") {
         binaries {
             executable()
         }
@@ -19,15 +15,15 @@ kotlin {
     }
 
     sourceSets {
-        val commonMain by getting
-        val nativeMain by creating {
+        val commonMain = getByName("commonMain")
+        val nativeMain = create("nativeMain") {
             dependsOn(commonMain)
             kotlin.srcDirs("src/nativeMain/kotlin")
         }
-        val macosMain by getting {
+        val macosMain = getByName("macosMain") {
             dependsOn(nativeMain)
         }
-        val linuxMain by getting {
+        val linuxMain = getByName("linuxMain") {
             dependsOn(nativeMain)
         }
     }
