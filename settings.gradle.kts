@@ -1,5 +1,5 @@
 rootProject.name = "fortis"
-include("strage-engine")
+include("storage-engine")
 include("io")
 
 dependencyResolutionManagement {
