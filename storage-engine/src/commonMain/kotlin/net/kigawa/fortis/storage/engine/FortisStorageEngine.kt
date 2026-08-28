@@ -1,16 +1,9 @@
 package net.kigawa.fortis.storage.engine
 
-@Suppress("unused")
-class FortisStorageEngine {
-    suspend fun get(key: ByteArray): ByteArray? {
-        TODO()
-    }
+interface FortisStorageEngine {
+    suspend fun get(key: ByteArray): ByteArray?
 
-    suspend fun put(key: ByteArray, value: ByteArray) {
-        TODO()
-    }
+    suspend fun put(key: ByteArray, value: ByteArray)
 
-    suspend fun delete(key: ByteArray): Boolean {
-        TODO()
-    }
+    suspend fun delete(key: ByteArray): Boolean
 }
