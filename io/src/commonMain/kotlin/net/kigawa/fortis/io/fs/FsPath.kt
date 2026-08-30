@@ -8,4 +8,6 @@ data class FsPath(
         data class Name(val name: String): Element
         object Parent: Element
     }
+
+    fun toFile(): FortisFile = Fs.getFile(this)
 }

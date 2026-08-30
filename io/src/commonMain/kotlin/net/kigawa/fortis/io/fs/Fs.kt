@@ -7,13 +7,18 @@ object Fs {
     )
 
     fun getPath(strElements: List<String>, isAbsolute: Boolean): FsPath = getPath(
-        strElements
-            .map { if (it == "..") FsPath.Element.Parent else FsPath.Element.Name(it) },
-        isAbsolute
+        strElements.map { if (it == "..") FsPath.Element.Parent else FsPath.Element.Name(it) }, isAbsolute
     )
 
-    fun getPath(elements: List<FsPath.Element>, isAbsolute: Boolean): FsPath =
-        FsPath(elements, isAbsolute)
+    fun getPath(elements: List<FsPath.Element>, isAbsolute: Boolean): FsPath = FsPath(elements, isAbsolute)
 
     fun getFile(path: FsPath): FortisFile = FortisFile(path)
+    suspend fun openRead(file: FortisFile, block: suspend (input: FsInput) -> Unit) = block(FsInput(file))
+
+    suspend fun openWrite(file: FortisFile, block: suspend (input: FsOutput) -> Unit) = block(FsOutput(file))
+
+    suspend fun openReadWrite(file: FortisFile, block: suspend (input: FsIo) -> Unit) = block(
+        FsIo(FsInput(file), FsOutput(file))
+    )
+
 }
