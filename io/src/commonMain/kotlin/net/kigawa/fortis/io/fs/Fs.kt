@@ -1,5 +1,7 @@
 package net.kigawa.fortis.io.fs
 
+typealias FsOffset = Long
+typealias FsSize = Long
 
 object Fs {
     fun getPath(strPath: String): FsPath = getPath(
@@ -15,21 +17,21 @@ object Fs {
     fun getFile(path: FsPath): FortisFile = FortisFile(path)
     suspend fun openRead(file: FortisFile, block: suspend (input: FsInput) -> Unit) = block(FsInput(file))
 
-    suspend fun openWrite(file: FortisFile, block: suspend (input: FsOutput) -> Unit) = block(FsOutput(file))
+    suspend fun openWrite(file: FortisFile, block: suspend (output: FsOutput) -> Unit) = block(FsOutput(file))
 
-    suspend fun openReadWrite(file: FortisFile, block: suspend (input: FsIo) -> Unit) = block(
+    suspend fun openReadWrite(file: FortisFile, block: suspend (io: FsIo) -> Unit) = block(
         FsIo(FsInput(file), FsOutput(file))
     )
 
-    suspend fun readAt(input: FsInput, offset: Long, buffer: ByteArray): Int {
+    suspend fun readAt(input: FsInput, offset: FsOffset, buffer: ByteArray): Int {
         TODO()
     }
 
-    suspend fun writeAt(output: FsOutput, offset: Long, data: ByteArray) {
+    suspend fun writeAt(output: FsOutput, offset: FsOffset, data: ByteArray) {
         TODO()
     }
 
-    suspend fun writeAppend(output: FsOutput, data: ByteArray) {
+    suspend fun writeAppend(output: FsOutput, data: ByteArray): FsOffset {
         TODO()
     }
 
@@ -37,7 +39,7 @@ object Fs {
         TODO()
     }
 
-    suspend fun truncate(size: Long) {
+    suspend fun truncate(output: FsOutput, size: FsSize) {
         TODO()
     }
 }
