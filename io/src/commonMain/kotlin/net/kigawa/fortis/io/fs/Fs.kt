@@ -21,4 +21,23 @@ object Fs {
         FsIo(FsInput(file), FsOutput(file))
     )
 
+    suspend fun readAt(input: FsInput, offset: Long, buffer: ByteArray): Int {
+        TODO()
+    }
+
+    suspend fun writeAt(output: FsOutput, offset: Long, data: ByteArray) {
+        TODO()
+    }
+
+    suspend fun writeAppend(output: FsOutput, data: ByteArray) {
+        TODO()
+    }
+
+    suspend fun sync(output: FsOutput) {
+        TODO()
+    }
+
+    suspend fun truncate(size: Long) {
+        TODO()
+    }
 }
