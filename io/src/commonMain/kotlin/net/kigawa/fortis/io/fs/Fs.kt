@@ -19,9 +19,3 @@ object Fs {
 
 
 }
-
-expect suspend fun Fs.openRead(file: FortisFile, block: suspend (input: FsInput) -> Unit)
-
-expect suspend fun Fs.openWrite(file: FortisFile, isCreate: Boolean, block: suspend (output: FsOutput) -> Unit)
-
-expect suspend fun Fs.openReadWrite(file: FortisFile, isCreate: Boolean, block: suspend (io: FsIo) -> Unit)

@@ -1,10 +1,9 @@
 package net.kigawa.fortis.io.fs
 
 data class FortisFile(val path: FsPath) {
-
-    suspend fun openRead(block: suspend (input: FsInput) -> Unit) = Fs.openRead(this, block)
-
-    suspend fun openWrite(block: suspend (input: FsOutput) -> Unit) = Fs.openWrite(this, block)
-
-    suspend fun openReadWrite(block: suspend (input: FsIo) -> Unit) = Fs.openReadWrite(this, block)
 }
+expect suspend fun FortisFile.openRead(file: FortisFile, block: suspend (input: FsInput) -> Unit)
+
+expect suspend fun FortisFile.openWrite(file: FortisFile, isCreate: Boolean, block: suspend (output: FsOutput) -> Unit)
+
+expect suspend fun FortisFile.openReadWrite(file: FortisFile, isCreate: Boolean, block: suspend (io: FsIo) -> Unit)
