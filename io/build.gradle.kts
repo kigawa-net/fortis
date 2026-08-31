@@ -8,6 +8,8 @@ kotlin {
     linuxX64()
     
     sourceSets {
-        val commonMain = getByName("commonMain")
+        commonMain.dependencies {
+            implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.1")
+        }
     }
 }
