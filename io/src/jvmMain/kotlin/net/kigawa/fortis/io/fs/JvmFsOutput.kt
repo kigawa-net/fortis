@@ -9,12 +9,18 @@ data class JvmFsOutput(
     override val file: FortisFile,
     val channel: FileChannel,
 ): FsOutput {
-    override suspend fun writeAt(offset: FsOffset, data: ByteArray): Int = withContext(Dispatchers.IO) {
-        channel.write(ByteBuffer.wrap(data), offset)
+    override suspend fun writeAt(
+        offset: FsOffset, data: ByteArray,
+        dataOffset: Int,
+        length: Int,
+    ): Int = withContext(Dispatchers.IO) {
+        channel.write(ByteBuffer.wrap(data, dataOffset, length), offset)
     }
 
-    override suspend fun writeAppend(data: ByteArray): Int = withContext(Dispatchers.IO) {
-        writeAt(channel.size(), data)
+    override suspend fun writeAppend(
+        data: ByteArray, dataOffset: Int, length: Int,
+    ): Int = withContext(Dispatchers.IO) {
+        writeAt(channel.size(), data, dataOffset, length)
     }
 
     override suspend fun sync() = withContext(Dispatchers.IO) {
