@@ -6,39 +6,44 @@ import java.nio.channels.FileChannel
 import java.nio.file.StandardOpenOption
 
 actual suspend fun FortisFile.openRead(
-    file: FortisFile, block: suspend (input: FsInput) -> Unit,
+    block: suspend (input: FsInput) -> Unit,
 ) {
     withContext(Dispatchers.IO) {
-        FileChannel.open(file.path.toJvmPath(), StandardOpenOption.READ).use { channel ->
-            block(JvmFsInput(file, channel))
+        FileChannel.open(path.toJvmPath(), StandardOpenOption.READ).use { channel ->
+            block(JvmFsInput(this@openRead, channel))
         }
     }
 }
 
 actual suspend fun FortisFile.openWrite(
-    file: FortisFile, isCreate: Boolean,
+    isCreate: Boolean,
     block: suspend (output: FsOutput) -> Unit,
 ) {
     var options = arrayOf(StandardOpenOption.WRITE)
     if (isCreate) options += StandardOpenOption.CREATE
 
     withContext(Dispatchers.IO) {
-        FileChannel.open(file.path.toJvmPath(), *options).use { channel ->
-            block(JvmFsOutput(file, channel))
+        FileChannel.open(path.toJvmPath(), *options).use { channel ->
+            block(JvmFsOutput(this@openWrite, channel))
         }
     }
 }
 
 actual suspend fun FortisFile.openReadWrite(
-    file: FortisFile, isCreate: Boolean,
+    isCreate: Boolean,
     block: suspend (io: FsIo) -> Unit,
 ) {
     var options = arrayOf(StandardOpenOption.READ, StandardOpenOption.WRITE)
     if (isCreate) options += StandardOpenOption.CREATE
 
     withContext(Dispatchers.IO) {
-        FileChannel.open(file.path.toJvmPath(), *options).use { channel ->
-            block(FsIo(JvmFsInput(file, channel), JvmFsOutput(file, channel)))
+        FileChannel.open(path.toJvmPath(), *options).use { channel ->
+            block(
+                FsIo(
+                    JvmFsInput(this@openReadWrite, channel),
+                    JvmFsOutput(this@openReadWrite, channel)
+                )
+            )
         }
     }
 }

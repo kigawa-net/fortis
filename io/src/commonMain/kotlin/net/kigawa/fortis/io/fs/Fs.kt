@@ -14,8 +14,4 @@ object Fs {
     )
 
     fun getPath(elements: List<FsPath.Element>, isAbsolute: Boolean): FsPath = FsPath(elements, isAbsolute)
-
-    fun getFile(path: FsPath): FortisFile = FortisFile(path)
-
-
 }

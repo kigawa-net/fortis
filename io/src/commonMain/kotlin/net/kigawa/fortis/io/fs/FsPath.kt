@@ -18,7 +18,7 @@ data class FsPath(
         }
     }
 
-    fun toFile(): FortisFile = Fs.getFile(this)
+    fun toFile(): FortisFile = FortisFile(this)
     override fun toString(): String {
         return elements.joinToString("/", prefix = if (isAbsolute) "/" else "") { it.toString() }
     }
