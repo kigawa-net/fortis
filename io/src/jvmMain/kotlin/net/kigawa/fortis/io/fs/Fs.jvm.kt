@@ -44,28 +44,3 @@ actual suspend fun Fs.openReadWrite(
     }
 }
 
-actual suspend fun Fs.readAt(
-    input: FsInput, offset: FsOffset, buffer: ByteArray,
-): Int {
-    TODO("Not yet implemented")
-}
-
-actual suspend fun Fs.writeAt(
-    output: FsOutput, offset: FsOffset, data: ByteArray,
-): Int {
-    TODO()
-}
-
-actual suspend fun Fs.writeAppend(
-    output: FsOutput, data: ByteArray,
-): FsOffset {
-    TODO("Not yet implemented")
-}
-
-actual suspend fun Fs.sync(output: FsOutput) {
-}
-
-actual suspend fun Fs.truncate(
-    output: FsOutput, size: FsSize,
-) {
-}
