@@ -1,8 +1,6 @@
 <component name="ArtifactManager">
   <artifact type="jar" name="storage-engine-jvm">
     <output-path>$PROJECT_DIR$/storage-engine/build/libs</output-path>
-    <root id="archive" name="storage-engine-jvm.jar">
-      <element id="module-output" name="fortis.storage-engine.jvmMain" />
-    </root>
+    <root id="archive" name="storage-engine-jvm.jar" />
   </artifact>
 </component>
