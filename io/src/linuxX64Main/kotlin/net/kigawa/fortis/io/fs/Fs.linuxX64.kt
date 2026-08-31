@@ -6,12 +6,41 @@ actual suspend fun Fs.openRead(
 ) {
 }
 
+
 actual suspend fun Fs.openWrite(
-    file: FortisFile, block: suspend (output: FsOutput) -> Unit,
+    file: FortisFile, isCreate: Boolean,
+    block: suspend (output: FsOutput) -> Unit,
 ) {
 }
 
 actual suspend fun Fs.openReadWrite(
-    file: FortisFile, block: suspend (io: FsIo) -> Unit,
+    file: FortisFile, isCreate: Boolean,
+    block: suspend (io: FsIo) -> Unit,
+) {
+}
+
+actual suspend fun Fs.readAt(
+    input: FsInput, offset: FsOffset, buffer: ByteArray,
+): Int {
+    TODO("Not yet implemented")
+}
+
+actual suspend fun Fs.writeAt(
+    output: FsOutput, offset: FsOffset, data: ByteArray,
+): Int {
+    TODO()
+}
+
+actual suspend fun Fs.writeAppend(
+    output: FsOutput, data: ByteArray,
+): FsOffset {
+    TODO("Not yet implemented")
+}
+
+actual suspend fun Fs.sync(output: FsOutput) {
+}
+
+actual suspend fun Fs.truncate(
+    output: FsOutput, size: FsSize,
 ) {
 }

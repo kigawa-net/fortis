@@ -17,29 +17,16 @@ object Fs {
 
     fun getFile(path: FsPath): FortisFile = FortisFile(path)
 
-    suspend fun readAt(input: FsInput, offset: FsOffset, buffer: ByteArray): Int {
-        TODO()
-    }
 
-    suspend fun writeAt(output: FsOutput, offset: FsOffset, data: ByteArray) {
-        TODO()
-    }
-
-    suspend fun writeAppend(output: FsOutput, data: ByteArray): FsOffset {
-        TODO()
-    }
-
-    suspend fun sync(output: FsOutput) {
-        TODO()
-    }
-
-    suspend fun truncate(output: FsOutput, size: FsSize) {
-        TODO()
-    }
 }
 
 expect suspend fun Fs.openRead(file: FortisFile, block: suspend (input: FsInput) -> Unit)
 
-expect suspend fun Fs.openWrite(file: FortisFile, block: suspend (output: FsOutput) -> Unit)
+expect suspend fun Fs.openWrite(file: FortisFile, isCreate: Boolean, block: suspend (output: FsOutput) -> Unit)
 
-expect suspend fun Fs.openReadWrite(file: FortisFile, block: suspend (io: FsIo) -> Unit)
+expect suspend fun Fs.openReadWrite(file: FortisFile, isCreate: Boolean, block: suspend (io: FsIo) -> Unit)
+expect suspend fun Fs.readAt(input: FsInput, offset: FsOffset, buffer: ByteArray): Int
+expect suspend fun Fs.writeAt(output: FsOutput, offset: FsOffset, data: ByteArray): Int
+expect suspend fun Fs.writeAppend(output: FsOutput, data: ByteArray): FsOffset
+expect suspend fun Fs.sync(output: FsOutput)
+expect suspend fun Fs.truncate(output: FsOutput, size: FsSize)
