@@ -8,7 +8,7 @@ object WalCodec {
     fun decode(
         data: ByteArray,
         offset: Int = 0,
-    ): DecodedWalRecord {
+    ): WalDecodeResult {
         TODO()
     }
 }
