@@ -5,9 +5,21 @@ data class FsPath(
     val isAbsolute: Boolean,
 ) {
     sealed interface Element {
-        data class Name(val name: String): Element
-        object Parent: Element
+        data class Name(val name: String): Element {
+            override fun toString(): String {
+                return name
+            }
+        }
+
+        object Parent: Element {
+            override fun toString(): String {
+                return ".."
+            }
+        }
     }
 
     fun toFile(): FortisFile = Fs.getFile(this)
+    override fun toString(): String {
+        return elements.joinToString("/", prefix = if (isAbsolute) "/" else "") { it.toString() }
+    }
 }

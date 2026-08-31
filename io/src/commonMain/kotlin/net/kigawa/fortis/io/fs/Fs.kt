@@ -8,6 +8,7 @@ object Fs {
         strPath.split("/"), strPath.startsWith("/")
     )
 
+    @kotlin.jvm.JvmName("getPathFromStrings")
     fun getPath(strElements: List<String>, isAbsolute: Boolean): FsPath = getPath(
         strElements.map { if (it == "..") FsPath.Element.Parent else FsPath.Element.Name(it) }, isAbsolute
     )
@@ -15,13 +16,6 @@ object Fs {
     fun getPath(elements: List<FsPath.Element>, isAbsolute: Boolean): FsPath = FsPath(elements, isAbsolute)
 
     fun getFile(path: FsPath): FortisFile = FortisFile(path)
-    suspend fun openRead(file: FortisFile, block: suspend (input: FsInput) -> Unit) = block(FsInput(file))
-
-    suspend fun openWrite(file: FortisFile, block: suspend (output: FsOutput) -> Unit) = block(FsOutput(file))
-
-    suspend fun openReadWrite(file: FortisFile, block: suspend (io: FsIo) -> Unit) = block(
-        FsIo(FsInput(file), FsOutput(file))
-    )
 
     suspend fun readAt(input: FsInput, offset: FsOffset, buffer: ByteArray): Int {
         TODO()
@@ -43,3 +37,9 @@ object Fs {
         TODO()
     }
 }
+
+expect suspend fun Fs.openRead(file: FortisFile, block: suspend (input: FsInput) -> Unit)
+
+expect suspend fun Fs.openWrite(file: FortisFile, block: suspend (output: FsOutput) -> Unit)
+
+expect suspend fun Fs.openReadWrite(file: FortisFile, block: suspend (io: FsIo) -> Unit)
