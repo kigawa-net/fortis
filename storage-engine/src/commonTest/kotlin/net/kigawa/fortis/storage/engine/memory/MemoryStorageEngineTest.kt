@@ -5,6 +5,10 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 
 class MemoryStorageEngineTest {
     @Test
@@ -61,5 +65,46 @@ class MemoryStorageEngineTest {
         result[0] = 8
 
         assertContentEquals(byteArrayOf(2), storage.get(key))
+    }
+
+    @Test
+    fun concurrentOperationsKeepEntriesConsistent() = kotlinx.coroutines.test.runTest {
+        val storage = MemoryStorageEngine()
+        val entries = (0 until 100).map { index ->
+            byteArrayOf(index.toByte()) to byteArrayOf((index * 2).toByte())
+        }
+
+        coroutineScope {
+            entries.map { (key, value) ->
+                async(Dispatchers.Default) {
+                    storage.put(key, value)
+                }
+            }.awaitAll()
+        }
+
+        coroutineScope {
+            entries.map { (key, value) ->
+                async(Dispatchers.Default) {
+                    assertContentEquals(value, storage.get(key))
+                }
+            }.awaitAll()
+        }
+
+        val deleted = coroutineScope {
+            entries.map { (key, _) ->
+                async(Dispatchers.Default) {
+                    storage.delete(key)
+                }
+            }.awaitAll()
+        }
+        assertTrue(deleted.all { it })
+
+        coroutineScope {
+            entries.map { (key, _) ->
+                async(Dispatchers.Default) {
+                    assertNull(storage.get(key))
+                }
+            }.awaitAll()
+        }
     }
 }
