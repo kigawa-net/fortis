@@ -6,7 +6,7 @@ interface FsOutput: Output {
     val file: FortisFile
 
     suspend fun writeAt(offset: FsOffset, data: ByteArray): Int
-    suspend fun writeAppend(data: ByteArray): FsOffset
+    suspend fun writeAppend(data: ByteArray): Int
     suspend fun sync()
     suspend fun truncate(size: FsByteSize)
 
