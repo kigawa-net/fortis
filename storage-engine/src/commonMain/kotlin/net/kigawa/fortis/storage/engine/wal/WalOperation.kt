@@ -7,8 +7,7 @@ enum class WalOperation(
     DELETE(2);
 
     companion object {
-        fun fromCode(code: Byte): WalOperation =
+        fun fromCode(code: Byte): WalOperation? =
             entries.firstOrNull { it.code == code }
-                ?: error("Unknown WAL operation: $code")
     }
 }
