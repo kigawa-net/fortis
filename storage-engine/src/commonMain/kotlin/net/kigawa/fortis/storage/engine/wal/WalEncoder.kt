@@ -9,7 +9,12 @@ class WalEncoder(
             record.key.size +
             maxOf(valueLength, 0)
     val buffer = ByteArray(totalSize)
-    fun encode(): ByteArray {
+    fun encode(): ByteArray {require(
+        when (record.operation) {
+            WalOperation.PUT -> record.value != null
+            WalOperation.DELETE -> record.value == null
+        }
+    )
         // magic
         buffer[0] = 'F'.code.toByte()
         buffer[1] = 'W'.code.toByte()

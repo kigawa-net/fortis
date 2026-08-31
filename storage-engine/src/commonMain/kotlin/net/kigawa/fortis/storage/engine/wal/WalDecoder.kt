@@ -37,11 +37,27 @@ class WalDecoder(
             ?: return WalDecodeResult.Corrupted(
                 "Unknown WAL operation: ${data[offset + 5]}"
             )
-
         val sequence = readLong(data, offset + 6)
         val keyLength = readInt(data, offset + 14)
         val valueLength = readInt(data, offset + 18)
 
+        when (operation) {
+            WalOperation.PUT -> {
+                if (valueLength < 0) {
+                    return WalDecodeResult.Corrupted(
+                        "PUT record must contain a value"
+                    )
+                }
+            }
+
+            WalOperation.DELETE -> {
+                if (valueLength != -1) {
+                    return WalDecodeResult.Corrupted(
+                        "DELETE record must not contain a value"
+                    )
+                }
+            }
+        }
         if (keyLength < 0) {
             return WalDecodeResult.Corrupted(
                 "Invalid key length: $keyLength"
