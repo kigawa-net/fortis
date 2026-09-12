@@ -1,11 +1,9 @@
 package net.kigawa.fortis.storage.engine.wal
 
-import net.kigawa.fortis.storage.engine.wal.WalCodec.HEADER_SIZE
-import net.kigawa.fortis.storage.engine.wal.WalCodec.VERSION
-
 class WalDecoder(
     val data: ByteArray,
     val offset: Int = 0,
+    val codec: WalCodec = WalCodec(),
 ) {
     fun decode(
     ): WalDecodeResult {
@@ -13,7 +11,7 @@ class WalDecoder(
             return WalDecodeResult.Corrupted("Invalid offset: $offset")
         }
 
-        if (data.size - offset < HEADER_SIZE) {
+        if (data.size - offset < codec.headerSize) {
             return WalDecodeResult.Incomplete
         }
 
@@ -27,7 +25,7 @@ class WalDecoder(
         }
 
         val version = data[offset + 4]
-        if (version != VERSION) {
+        if (version != codec.version) {
             return WalDecodeResult.Corrupted(
                 "Unsupported WAL version: $version"
             )
@@ -75,7 +73,7 @@ class WalDecoder(
                 maxOf(valueLength, 0).toLong()
 
         val recordSize =
-            HEADER_SIZE.toLong() + payloadSize
+            codec.headerSize.toLong() + payloadSize
 
         if (recordSize > Int.MAX_VALUE) {
             return WalDecodeResult.Corrupted(
@@ -87,7 +85,7 @@ class WalDecoder(
             return WalDecodeResult.Incomplete
         }
 
-        val keyStart = offset + HEADER_SIZE
+        val keyStart = offset + codec.headerSize
         val keyEnd = keyStart + keyLength
 
         val key = data.copyOfRange(

@@ -1,11 +1,12 @@
 package net.kigawa.fortis.storage.engine.wal
 
-object WalCodec {
-    internal const val HEADER_SIZE = 22
-    internal const val VERSION: Byte = 1
-    fun encode(record: WalRecord): ByteArray = WalEncoder(record).encode()
+data class WalCodec(
+    val headerSize: Int = 22,
+    val version: Byte = 1,
+) {
+    fun encode(record: WalRecord): ByteArray = WalEncoder(record, this).encode()
     fun decode(
         data: ByteArray,
         offset: Int = 0,
-    ): WalDecodeResult = WalDecoder(data, offset).decode()
+    ): WalDecodeResult = WalDecoder(data, offset, this).decode()
 }

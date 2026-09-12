@@ -2,10 +2,11 @@ package net.kigawa.fortis.storage.engine.wal
 
 class WalEncoder(
     val record: WalRecord,
+    val codec: WalCodec = WalCodec(),
 ) {
     val valueLength = record.value?.size ?: -1
     val totalSize =
-        WalCodec.HEADER_SIZE +
+        codec.headerSize +
             record.key.size +
             maxOf(valueLength, 0)
     val buffer = ByteArray(totalSize)
@@ -21,7 +22,7 @@ class WalEncoder(
         buffer[2] = 'A'.code.toByte()
         buffer[3] = 'L'.code.toByte()
 
-        buffer[4] = WalCodec.VERSION
+        buffer[4] = codec.version
         buffer[5] = record.operation.code
 
         writeLong(
@@ -41,12 +42,12 @@ class WalEncoder(
 
         record.key.copyInto(
             destination = buffer,
-            destinationOffset = WalCodec.HEADER_SIZE,
+            destinationOffset = codec.headerSize,
         )
 
         record.value?.copyInto(
             destination = buffer,
-            destinationOffset = WalCodec.HEADER_SIZE + record.key.size,
+            destinationOffset = codec.headerSize + record.key.size,
         )
 
         return buffer
