@@ -44,8 +44,10 @@ data class FileWal(
     }
 
     override suspend fun sync() {
-        file.openWrite(isCreate = true) { output ->
-            output.sync()
+        mutex.withLock {
+            file.openWrite(isCreate = true) { output ->
+                output.sync()
+            }
         }
     }
 }

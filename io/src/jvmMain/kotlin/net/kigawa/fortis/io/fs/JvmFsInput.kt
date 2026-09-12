@@ -14,4 +14,12 @@ data class JvmFsInput(
             channel.read(ByteBuffer.wrap(buffer), offset)
         }
     }
+
+    override suspend fun size(): FsByteSize {
+        return withContext(Dispatchers.IO) {
+            channel.size().toFsByteSize()
+        }
+    }
+
+
 }
