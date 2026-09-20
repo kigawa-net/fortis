@@ -32,22 +32,16 @@ class DiskStorageEngine(
     ) {
         mutex.withLock {
             checkHealthy()
-            check(nextSequence != Long.MAX_VALUE) {
-                "WAL sequence exhausted"
-            }
+
+            val sequence = nextSequence()
             val record = WalRecord(
-                sequence = nextSequence++,
+                sequence = sequence,
                 operation = WalOperation.PUT,
                 key = key,
                 value = value,
             )
-            try {
-                wal.append(record)
-                wal.sync()
-            } catch (e: Throwable) {
-                failed = e
-                throw e
-            }
+
+            persist(record)
             memory.put(key, value)
         }
     }
@@ -57,23 +51,19 @@ class DiskStorageEngine(
     ): Boolean {
         return mutex.withLock {
             checkHealthy()
+
             if (memory.get(key) == null) {
                 return@withLock false
             }
 
             val record = WalRecord(
-                sequence = nextSequence++,
+                sequence = nextSequence(),
                 operation = WalOperation.DELETE,
                 key = key,
                 value = null,
             )
-            try {
-                wal.append(record)
-                wal.sync()
-            } catch (e: Throwable) {
-                failed = e
-                throw e
-            }
+
+            persist(record)
             memory.delete(key)
         }
     }
@@ -85,5 +75,25 @@ class DiskStorageEngine(
                 it,
             )
         }
+    }
+
+    private suspend fun persist(
+        record: WalRecord,
+    ) {
+        try {
+            wal.append(record)
+            wal.sync()
+        } catch (e: Throwable) {
+            failed = e
+            throw e
+        }
+    }
+
+    private fun nextSequence(): Long {
+        check(nextSequence < Long.MAX_VALUE) {
+            "WAL sequence exhausted"
+        }
+
+        return nextSequence++
     }
 }
