@@ -4,11 +4,9 @@ import net.kigawa.fortis.storage.engine.memory.MemoryStorageEngine
 import net.kigawa.fortis.storage.engine.wal.Wal
 import net.kigawa.fortis.storage.engine.wal.WalOperation
 
-data class DiskStorageEngineBuilder(
-    private var wal: Wal? = null,
-    private var memory: MemoryStorageEngine? = null,
-) {
-
+class DiskStorageEngineBuilder {
+    private var wal: Wal? = null
+    private var memory: MemoryStorageEngine? = null
     fun wal(
         wal: Wal,
     ): DiskStorageEngineBuilder = apply {

@@ -8,13 +8,13 @@ import net.kigawa.fortis.storage.engine.wal.Wal
 import net.kigawa.fortis.storage.engine.wal.WalOperation
 import net.kigawa.fortis.storage.engine.wal.WalRecord
 
-data class DiskStorageEngine(
+class DiskStorageEngine(
     private val wal: Wal,
     private val memory: MemoryStorageEngine = MemoryStorageEngine(),
     private var nextSequence: Long,
-    private val mutex: Mutex = Mutex(),
-    private var failed: Throwable? = null,
 ): FortisStorageEngine {
+    private val mutex: Mutex = Mutex()
+    private var failed: Throwable? = null
 
     companion object {
         val builder = ::DiskStorageEngineBuilder
@@ -32,7 +32,9 @@ data class DiskStorageEngine(
     ) {
         mutex.withLock {
             checkHealthy()
-
+            check(nextSequence != Long.MAX_VALUE) {
+                "WAL sequence exhausted"
+            }
             val record = WalRecord(
                 sequence = nextSequence++,
                 operation = WalOperation.PUT,
@@ -54,6 +56,7 @@ data class DiskStorageEngine(
         key: ByteArray,
     ): Boolean {
         return mutex.withLock {
+            checkHealthy()
             if (memory.get(key) == null) {
                 return@withLock false
             }
@@ -64,10 +67,13 @@ data class DiskStorageEngine(
                 key = key,
                 value = null,
             )
-
-            wal.append(record)
-            wal.sync()
-
+            try {
+                wal.append(record)
+                wal.sync()
+            } catch (e: Throwable) {
+                failed = e
+                throw e
+            }
             memory.delete(key)
         }
     }

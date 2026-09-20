@@ -121,26 +121,26 @@ class DiskStorageEngineTest {
     }
 
     @Test
-    fun appendFailureLeavesMemoryUnchangedOnPut() = runTest {
-        assertFailureLeavesMemoryUnchanged(failSync = false, delete = false)
+    fun appendFailurePoisonsEngineOnPut() = runTest {
+        assertFailurePoisonsEngine(failSync = false, delete = false)
     }
 
     @Test
-    fun syncFailureLeavesMemoryUnchangedOnPut() = runTest {
-        assertFailureLeavesMemoryUnchanged(failSync = true, delete = false)
+    fun syncFailurePoisonsEngineOnPut() = runTest {
+        assertFailurePoisonsEngine(failSync = true, delete = false)
     }
 
     @Test
-    fun appendFailureLeavesMemoryUnchangedOnDelete() = runTest {
-        assertFailureLeavesMemoryUnchanged(failSync = false, delete = true)
+    fun appendFailurePoisonsEngineOnDelete() = runTest {
+        assertFailurePoisonsEngine(failSync = false, delete = true)
     }
 
     @Test
-    fun syncFailureLeavesMemoryUnchangedOnDelete() = runTest {
-        assertFailureLeavesMemoryUnchanged(failSync = true, delete = true)
+    fun syncFailurePoisonsEngineOnDelete() = runTest {
+        assertFailurePoisonsEngine(failSync = true, delete = true)
     }
 
-    private suspend fun assertFailureLeavesMemoryUnchanged(failSync: Boolean, delete: Boolean) {
+    private suspend fun assertFailurePoisonsEngine(failSync: Boolean, delete: Boolean) {
         val wal = TestWal()
         val storage = build(wal)
         val key = byteArrayOf(1)
@@ -160,15 +160,28 @@ class DiskStorageEngineTest {
         assertEquals(2, wal.syncCount)
         assertEquals(before.size + if (failSync) 1 else 0, wal.records().size)
 
-        if (!delete) {
-            assertSame(failure, assertFailsWith<IllegalStateException> {
-                storage.put(byteArrayOf(3), byteArrayOf(30))
-            })
-            assertNull(storage.get(byteArrayOf(3)))
-        }
+        val recordsAfterFailure = wal.records()
+        wal.appendFailure = null
+        wal.syncFailure = null
+
+        assertSame(failure, assertFailsWith<IllegalStateException> {
+            storage.put(byteArrayOf(3), byteArrayOf(30))
+        }.cause)
+        assertSame(failure, assertFailsWith<IllegalStateException> {
+            storage.delete(key)
+        }.cause)
+        assertSame(failure, assertFailsWith<IllegalStateException> {
+            storage.delete(byteArrayOf(3))
+        }.cause)
+
+        assertNull(storage.get(byteArrayOf(3)))
+        assertContentEquals(byteArrayOf(10), storage.get(key))
+        assertContentEquals(byteArrayOf(20), storage.get(byteArrayOf(2)))
+        assertEquals(recordsAfterFailure, wal.records())
+        assertEquals(2, wal.syncCount)
     }
 
-    private suspend fun build(wal: Wal) = DiskStorageEngine.builder().wal(wal).build()
+    private suspend fun build(wal: Wal) = DiskStorageEngineBuilder().wal(wal).build()
 
     private fun putRecord(sequence: Long, key: Int, value: Int) = WalRecord(
         sequence, WalOperation.PUT, byteArrayOf(key.toByte()), byteArrayOf(value.toByte()),
