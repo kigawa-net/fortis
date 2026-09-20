@@ -4,9 +4,10 @@ import net.kigawa.fortis.storage.engine.memory.MemoryStorageEngine
 import net.kigawa.fortis.storage.engine.wal.Wal
 import net.kigawa.fortis.storage.engine.wal.WalOperation
 
-class DiskStorageEngineBuilder {
-    private var wal: Wal? = null
-    private var memory: MemoryStorageEngine? = null
+data class DiskStorageEngineBuilder(
+    private var wal: Wal? = null,
+    private var memory: MemoryStorageEngine? = null,
+) {
 
     fun wal(
         wal: Wal,
@@ -48,7 +49,9 @@ class DiskStorageEngineBuilder {
                 maxSequence = record.sequence
             }
         }
-
+        check(maxSequence < Long.MAX_VALUE) {
+            "WAL sequence exhausted"
+        }
         return DiskStorageEngine(
             wal = wal,
             memory = memory,

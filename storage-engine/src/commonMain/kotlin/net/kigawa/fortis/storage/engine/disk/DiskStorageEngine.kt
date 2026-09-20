@@ -8,12 +8,13 @@ import net.kigawa.fortis.storage.engine.wal.Wal
 import net.kigawa.fortis.storage.engine.wal.WalOperation
 import net.kigawa.fortis.storage.engine.wal.WalRecord
 
-class DiskStorageEngine(
+data class DiskStorageEngine(
     private val wal: Wal,
     private val memory: MemoryStorageEngine = MemoryStorageEngine(),
     private var nextSequence: Long,
+    private val mutex: Mutex = Mutex(),
+    private var failed: Throwable? = null,
 ): FortisStorageEngine {
-    private val mutex = Mutex()
 
     companion object {
         val builder = ::DiskStorageEngineBuilder
@@ -30,16 +31,21 @@ class DiskStorageEngine(
         value: ByteArray,
     ) {
         mutex.withLock {
+            checkHealthy()
+
             val record = WalRecord(
                 sequence = nextSequence++,
                 operation = WalOperation.PUT,
                 key = key,
                 value = value,
             )
-
-            wal.append(record)
-            wal.sync()
-
+            try {
+                wal.append(record)
+                wal.sync()
+            } catch (e: Throwable) {
+                failed = e
+                throw e
+            }
             memory.put(key, value)
         }
     }
@@ -63,6 +69,15 @@ class DiskStorageEngine(
             wal.sync()
 
             memory.delete(key)
+        }
+    }
+
+    private fun checkHealthy() {
+        failed?.let {
+            throw IllegalStateException(
+                "DiskStorageEngine is in failed state",
+                it,
+            )
         }
     }
 }
