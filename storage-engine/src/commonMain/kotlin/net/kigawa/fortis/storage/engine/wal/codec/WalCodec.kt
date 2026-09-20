@@ -1,4 +1,4 @@
-package net.kigawa.fortis.storage.engine.wal
+package net.kigawa.fortis.storage.engine.wal.codec
 
 data class WalCodec(
     val headerSize: Int = 22,

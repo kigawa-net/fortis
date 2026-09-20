@@ -1,4 +1,4 @@
-package net.kigawa.fortis.storage.engine.wal
+package net.kigawa.fortis.storage.engine.wal.codec
 
 class WalEncoder(
     val record: WalRecord,

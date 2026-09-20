@@ -1,25 +1,24 @@
-package net.kigawa.fortis.storage.engine.disk
+package net.kigawa.fortis.storage.engine.wal
 
 import net.kigawa.fortis.storage.engine.memory.MemoryStorageEngine
-import net.kigawa.fortis.storage.engine.wal.Wal
-import net.kigawa.fortis.storage.engine.wal.WalOperation
+import net.kigawa.fortis.storage.engine.wal.codec.WalOperation
 
-class DiskStorageEngineBuilder {
+class WalDiskStorageEngineBuilder {
     private var wal: Wal? = null
     private var memory: MemoryStorageEngine? = null
     fun wal(
         wal: Wal,
-    ): DiskStorageEngineBuilder = apply {
+    ): WalDiskStorageEngineBuilder = apply {
         this.wal = wal
     }
 
     fun memory(
         memory: MemoryStorageEngine,
-    ): DiskStorageEngineBuilder = apply {
+    ): WalDiskStorageEngineBuilder = apply {
         this.memory = memory
     }
 
-    suspend fun build(): DiskStorageEngine {
+    suspend fun build(): WalDiskStorageEngine {
         val wal = requireNotNull(wal) {
             "wal is required"
         }
@@ -50,7 +49,7 @@ class DiskStorageEngineBuilder {
         check(maxSequence < Long.MAX_VALUE) {
             "WAL sequence exhausted"
         }
-        return DiskStorageEngine(
+        return WalDiskStorageEngine(
             wal = wal,
             memory = memory,
             nextSequence = maxSequence + 1,

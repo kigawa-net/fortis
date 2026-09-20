@@ -9,8 +9,9 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.yield
 import net.kigawa.fortis.storage.engine.wal.Wal
-import net.kigawa.fortis.storage.engine.wal.WalOperation
-import net.kigawa.fortis.storage.engine.wal.WalRecord
+import net.kigawa.fortis.storage.engine.wal.WalDiskStorageEngineBuilder
+import net.kigawa.fortis.storage.engine.wal.codec.WalOperation
+import net.kigawa.fortis.storage.engine.wal.codec.WalRecord
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -19,7 +20,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
-class DiskStorageEngineTest {
+class WalDiskStorageEngineTest {
     @Test
     fun putThenGetReturnsValue() = runTest {
         val wal = TestWal()
@@ -181,7 +182,7 @@ class DiskStorageEngineTest {
         assertEquals(2, wal.syncCount)
     }
 
-    private suspend fun build(wal: Wal) = DiskStorageEngineBuilder().wal(wal).build()
+    private suspend fun build(wal: Wal) = WalDiskStorageEngineBuilder().wal(wal).build()
 
     private fun putRecord(sequence: Long, key: Int, value: Int) = WalRecord(
         sequence, WalOperation.PUT, byteArrayOf(key.toByte()), byteArrayOf(value.toByte()),

@@ -9,9 +9,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
 import net.kigawa.fortis.io.fs.FsPath
-import net.kigawa.fortis.storage.engine.wal.WalCodec
-import net.kigawa.fortis.storage.engine.wal.WalOperation
-import net.kigawa.fortis.storage.engine.wal.WalRecord
+import net.kigawa.fortis.storage.engine.wal.codec.WalCodec
+import net.kigawa.fortis.storage.engine.wal.codec.WalOperation
+import net.kigawa.fortis.storage.engine.wal.codec.WalRecord
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals

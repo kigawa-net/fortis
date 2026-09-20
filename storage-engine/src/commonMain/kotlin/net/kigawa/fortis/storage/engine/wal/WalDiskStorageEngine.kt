@@ -1,14 +1,13 @@
-package net.kigawa.fortis.storage.engine.disk
+package net.kigawa.fortis.storage.engine.wal
 
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import net.kigawa.fortis.storage.engine.FortisStorageEngine
 import net.kigawa.fortis.storage.engine.memory.MemoryStorageEngine
-import net.kigawa.fortis.storage.engine.wal.Wal
-import net.kigawa.fortis.storage.engine.wal.WalOperation
-import net.kigawa.fortis.storage.engine.wal.WalRecord
+import net.kigawa.fortis.storage.engine.wal.codec.WalOperation
+import net.kigawa.fortis.storage.engine.wal.codec.WalRecord
 
-class DiskStorageEngine(
+class WalDiskStorageEngine(
     private val wal: Wal,
     private val memory: MemoryStorageEngine = MemoryStorageEngine(),
     private var nextSequence: Long,
@@ -17,7 +16,7 @@ class DiskStorageEngine(
     private var failed: Throwable? = null
 
     companion object {
-        val builder = ::DiskStorageEngineBuilder
+        val builder = ::WalDiskStorageEngineBuilder
     }
 
     override suspend fun get(
