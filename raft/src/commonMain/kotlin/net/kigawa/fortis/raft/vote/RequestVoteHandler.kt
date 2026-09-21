@@ -1,5 +1,7 @@
 package net.kigawa.fortis.raft.vote
 
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import net.kigawa.fortis.raft.RaftPersistentState
 import net.kigawa.fortis.raft.log.RaftLog
 
@@ -8,9 +10,10 @@ class RequestVoteHandler(
     private val state: RaftPersistentState,
     private val log: RaftLog,
 ) {
+    private val mutex = Mutex()
     suspend fun handle(
         request: RequestVoteRequest,
-    ): RequestVoteResponse {
+    ): RequestVoteResponse = mutex.withLock {
         if (request.term < state.currentTerm) {
             return RequestVoteResponse(
                 term = state.currentTerm,

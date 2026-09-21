@@ -24,20 +24,28 @@ class RequestVoteHandlerTest {
     }
 
     @Test
-    fun newerTermUpdatesCurrentTerm() = runTest {
+    fun newerTermUpdatesCurrentTermAndResetsVote() = runTest {
         val state = RaftPersistentState(
             currentTerm = 1,
             votedFor = "previous-candidate",
         )
+        val log = MemoryRaftLog().also {
+            it.append(entry(index = 1, term = 2))
+        }
 
-        val response = handler(state).handle(
-            request(term = 2, candidateId = "new-candidate")
+        val response = handler(state, log).handle(
+            request(
+                term = 2,
+                candidateId = "new-candidate",
+                lastLogIndex = 1,
+                lastLogTerm = 1,
+            )
         )
 
         assertEquals(2L, state.currentTerm)
         assertEquals(2L, response.term)
-        assertTrue(response.voteGranted)
-        assertEquals("new-candidate", state.votedFor)
+        assertFalse(response.voteGranted)
+        assertNull(state.votedFor)
     }
 
     @Test
@@ -109,6 +117,46 @@ class RequestVoteHandlerTest {
             request(
                 term = 3,
                 lastLogIndex = 1,
+                lastLogTerm = 2,
+            )
+        )
+
+        assertTrue(response.voteGranted)
+        assertEquals("candidate", state.votedFor)
+    }
+
+    @Test
+    fun rejectsShorterCandidateLogWhenLastTermsAreEqual() = runTest {
+        val state = RaftPersistentState(currentTerm = 3)
+        val log = MemoryRaftLog().also {
+            it.append(entry(index = 1, term = 1))
+            it.append(entry(index = 2, term = 2))
+        }
+
+        val response = handler(state, log).handle(
+            request(
+                term = 3,
+                lastLogIndex = 1,
+                lastLogTerm = 2,
+            )
+        )
+
+        assertFalse(response.voteGranted)
+        assertNull(state.votedFor)
+    }
+
+    @Test
+    fun grantsCandidateWhenLastTermAndIndexMatchLocalLog() = runTest {
+        val state = RaftPersistentState(currentTerm = 3)
+        val log = MemoryRaftLog().also {
+            it.append(entry(index = 1, term = 1))
+            it.append(entry(index = 2, term = 2))
+        }
+
+        val response = handler(state, log).handle(
+            request(
+                term = 3,
+                lastLogIndex = 2,
                 lastLogTerm = 2,
             )
         )
