@@ -35,8 +35,7 @@ class AppendEntriesResponseHandlerTest {
             ),
             request = request(term = 2, entries = entries),
             response = AppendEntriesResponse(term = 2, success = true),
-            role = net.kigawa.fortis.raft.RaftRole.LEADER,
-        ) {}
+        )
 
         assertEquals(2L, updatedPeers.getValue("peer").matchIndex)
         assertEquals(3L, updatedPeers.getValue("peer").nextIndex)
@@ -52,8 +51,7 @@ class AppendEntriesResponseHandlerTest {
             peers = mapOf("peer" to progress),
             request = request(term = 2),
             response = AppendEntriesResponse(term = 2, success = false),
-            role = net.kigawa.fortis.raft.RaftRole.LEADER,
-        ) {}
+        )
 
         assertEquals(4L, updatedPeers.getValue("peer").nextIndex)
         assertEquals(0L, updatedPeers.getValue("peer").matchIndex)
@@ -69,8 +67,7 @@ class AppendEntriesResponseHandlerTest {
             peers = mapOf("peer" to progress),
             request = request(term = 2),
             response = AppendEntriesResponse(term = 2, success = false),
-            role = net.kigawa.fortis.raft.RaftRole.LEADER,
-        ) {}
+        )
 
         assertEquals(1L, updatedPeers.getValue("peer").nextIndex)
     }
@@ -88,8 +85,7 @@ class AppendEntriesResponseHandlerTest {
             peers = mapOf("peer" to progress),
             request = request(term = 2),
             response = AppendEntriesResponse(term = 3, success = false),
-            role = net.kigawa.fortis.raft.RaftRole.LEADER,
-        ) {}
+        )
 
         assertEquals(3L, fixture.persistentState.currentTerm)
         assertNull(fixture.persistentState.votedFor)

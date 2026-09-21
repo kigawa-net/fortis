@@ -4,7 +4,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import net.kigawa.fortis.raft.RaftApplier
 import net.kigawa.fortis.raft.RaftPersistentState
-import net.kigawa.fortis.raft.RaftRole
 import net.kigawa.fortis.raft.log.RaftLog
 import net.kigawa.fortis.raft.log.RaftLogEntry
 import net.kigawa.fortis.raft.vote.RaftVolatileState
@@ -18,17 +17,8 @@ class AppendEntriesHandler(
     private val mutex = Mutex()
 
     suspend fun handle(
-        request: AppendEntriesRequest, setRole: (RaftRole) -> Unit,
-    ): AppendEntriesResponse {
-        val response =
-            handleLock(request)
-
-        if (request.term >= persistentState.currentTerm) {
-            setRole(RaftRole.FOLLOWER)
-        }
-
-        return response
-    }
+        request: AppendEntriesRequest,
+    ): AppendEntriesResponse = handleLock(request)
 
     internal suspend fun handleLock(
         request: AppendEntriesRequest,

@@ -1,75 +1,48 @@
 package net.kigawa.fortis.raft.append
 
-
-import net.kigawa.fortis.raft.*
+import net.kigawa.fortis.raft.RaftApplier
+import net.kigawa.fortis.raft.RaftCommitAdvancer
+import net.kigawa.fortis.raft.RaftPeerProgress
+import net.kigawa.fortis.raft.RaftPersistentState
 
 class AppendEntriesResponseHandler(
     private val persistentState: RaftPersistentState,
     private val commitAdvancer: RaftCommitAdvancer,
     private val applier: RaftApplier,
 ) {
-
     suspend fun handle(
         peerId: String,
         request: AppendEntriesRequest,
         response: AppendEntriesResponse,
-        role: RaftRole,
         peers: Map<String, RaftPeerProgress>,
-        setRole: (RaftRole) -> Unit,
     ): Map<String, RaftPeerProgress> {
-        if (role != RaftRole.LEADER) {
-            return peers
+        val progress = requireNotNull(peers[peerId]) {
+            "Unknown peer: $peerId"
         }
-        val progress =
-            requireNotNull(peers[peerId]) {
-                "Unknown peer: $peerId"
-            }
 
-        val previousTerm =
-            persistentState.currentTerm
-
-        handleInternal(
-            progress = progress,
-            peers = peers.values,
-            request = request,
-            response = response,
-        )
-
-        if (
-            persistentState.currentTerm >
-            previousTerm
-        ) {
-            setRole(RaftRole.FOLLOWER)
-        }
-        return peers
-    }
-
-    private suspend fun handleInternal(
-        progress: RaftPeerProgress,
-        peers: Collection<RaftPeerProgress>,
-        request: AppendEntriesRequest,
-        response: AppendEntriesResponse,
-    ): RaftPeerProgress {
         if (response.term > persistentState.currentTerm) {
             persistentState.currentTerm = response.term
             persistentState.votedFor = null
-            return progress
+            return peers
         }
 
-        if (!response.success) {
-            return progress.copy(nextIndex = maxOf(1L, progress.nextIndex - 1))
-        }
-
-        val lastSentIndex =
-            request.entries.lastOrNull()?.index
+        val updatedProgress = if (response.success) {
+            val lastSentIndex = request.entries.lastOrNull()?.index
                 ?: request.prevLogIndex
+            val matchIndex = maxOf(progress.matchIndex, lastSentIndex)
+            progress.copy(
+                nextIndex = matchIndex + 1,
+                matchIndex = matchIndex,
+            )
+        } else {
+            progress.copy(nextIndex = maxOf(1L, progress.nextIndex - 1))
+        }
+        val updatedPeers = peers + (peerId to updatedProgress)
 
-        var progress = progress.copy(matchIndex = maxOf(progress.matchIndex, lastSentIndex))
-
-        progress = progress.copy(nextIndex = progress.matchIndex + 1)
-
-        commitAdvancer.advance(peers)
-        applier.applyCommitted()
-        return progress
+        if (response.success) {
+            commitAdvancer.advance(updatedPeers.values)
+            applier.applyCommitted()
+        }
+        return updatedPeers
     }
 }

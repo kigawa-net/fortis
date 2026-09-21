@@ -2,8 +2,10 @@ package net.kigawa.fortis.raft
 
 import kotlinx.coroutines.test.runTest
 import net.kigawa.fortis.raft.append.AppendEntriesRequest
+import net.kigawa.fortis.raft.candidate.CandidateNode
+import net.kigawa.fortis.raft.follower.FollowerNode
+import net.kigawa.fortis.raft.leader.LeaderNode
 import net.kigawa.fortis.raft.log.MemoryRaftLog
-import net.kigawa.fortis.raft.node.RaftNode
 import net.kigawa.fortis.raft.node.RaftNodeBuilder
 import net.kigawa.fortis.raft.node.RaftTimeoutEvent
 import net.kigawa.fortis.raft.node.RaftTimer
@@ -12,19 +14,19 @@ import net.kigawa.fortis.raft.vote.RequestVoteRequest
 import net.kigawa.fortis.raft.vote.RequestVoteResponse
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
+import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
 class RaftNodeTimeoutTest {
     @Test
-    fun electionTimeoutStartsElectionAndResetsElectionTimer() = runTest {
+    fun electionTimeoutCreatesCandidateAndResetsElectionTimer() = runTest {
         val fixture = fixture()
 
-        val request = fixture.node.onElectionTimeout()
+        val result = fixture.follower.onElectionTimeout()
 
-        assertEquals(RaftRole.CANDIDATE, fixture.node.role)
-        assertEquals(1L, request.term)
-        assertEquals("self", request.candidateId)
+        assertIs<CandidateNode>(result.node)
+        assertEquals(1L, result.value.term)
+        assertEquals("self", result.value.candidateId)
         assertEquals(
             listOf<RaftTimeoutEvent>(RaftTimeoutEvent.Election),
             fixture.timer.events,
@@ -34,10 +36,10 @@ class RaftNodeTimeoutTest {
     @Test
     fun heartbeatTimeoutReplicatesPendingEntriesForEveryPeer() = runTest {
         val fixture = electedLeader()
-        fixture.node.appendCommand(command())
+        fixture.leader.appendCommand(command())
         fixture.timer.events.clear()
 
-        val heartbeats = fixture.node.onHeartbeatTimeout()
+        val heartbeats = fixture.leader.onHeartbeatTimeout()
 
         assertEquals(setOf("peer-1", "peer-2"), heartbeats.keys)
         assertTrue(heartbeats.values.all { it.entries.size == 1 })
@@ -48,19 +50,15 @@ class RaftNodeTimeoutTest {
     }
 
     @Test
-    fun heartbeatTimeoutIsRejectedWhenNotLeader() = runTest {
-        val fixture = fixture()
-
-        assertFailsWith<IllegalStateException> {
-            fixture.node.onHeartbeatTimeout()
-        }
+    fun followerDoesNotExposeHeartbeatApi() {
+        assertIs<FollowerNode>(fixture().follower)
     }
 
     @Test
     fun appendEntriesFromCurrentLeaderResetsElectionTimer() = runTest {
         val fixture = fixture()
 
-        fixture.node.handleAppendEntries(appendEntries(term = 1))
+        fixture.follower.handleAppendEntries(appendEntries(term = 1))
 
         assertEquals(
             listOf<RaftTimeoutEvent>(RaftTimeoutEvent.Election),
@@ -72,7 +70,7 @@ class RaftNodeTimeoutTest {
     fun staleAppendEntriesDoesNotResetElectionTimer() = runTest {
         val fixture = fixture(currentTerm = 2)
 
-        fixture.node.handleAppendEntries(appendEntries(term = 1))
+        fixture.follower.handleAppendEntries(appendEntries(term = 1))
 
         assertEquals(emptyList<RaftTimeoutEvent>(), fixture.timer.events)
     }
@@ -81,74 +79,69 @@ class RaftNodeTimeoutTest {
     fun grantingVoteResetsElectionTimer() = runTest {
         val fixture = fixture()
 
-        val response = fixture.node.handleRequestVote(
+        val result = fixture.follower.handleRequestVote(
             RequestVoteRequest(
                 term = 1,
                 candidateId = "peer-1",
                 lastLogIndex = 0,
                 lastLogTerm = 0,
-            )
+            ),
         )
 
-        assertTrue(response.voteGranted)
+        assertTrue(result.value.voteGranted)
         assertEquals(
             listOf<RaftTimeoutEvent>(RaftTimeoutEvent.Election),
             fixture.timer.events,
         )
     }
 
-    private suspend fun electedLeader(): Fixture =
-        fixture().also { fixture ->
-            fixture.node.startElection()
-            fixture.node.handleRequestVoteResponse(
-                peerId = "peer-1",
-                response = RequestVoteResponse(term = 1, voteGranted = true),
-            )
-            assertEquals(RaftRole.LEADER, fixture.node.role)
-        }
-
-    private fun fixture(
-        currentTerm: Long = 0,
-    ): Fixture {
-        val peers = mutableMapOf(
-            "peer-1" to RaftPeerProgress(nextIndex = 1),
-            "peer-2" to RaftPeerProgress(nextIndex = 1),
+    private suspend fun electedLeader(): Fixture {
+        val fixture = fixture()
+        val election = fixture.follower.onElectionTimeout()
+        val candidate = assertIs<CandidateNode>(election.node)
+        fixture.leader = assertIs<LeaderNode>(
+            candidate.handleRequestVoteResponse(
+                "peer-1",
+                RequestVoteResponse(term = 1, voteGranted = true),
+            ),
         )
-        val timer = RecordingTimer()
-        return Fixture(
-            timer = timer,
-            node = RaftNodeBuilder(
-                nodeId = "self",
-                peers = peers,
-                persistentState = RaftPersistentState(currentTerm = currentTerm),
-                volatileState = RaftVolatileState(),
-                log = MemoryRaftLog(),
-                stateMachine = NoOpStateMachine(),
-                timer = timer,
-            ).build(),
-        )
+        return fixture
     }
 
-    private fun appendEntries(term: Long) =
-        AppendEntriesRequest(
-            term = term,
-            leaderId = "leader",
-            prevLogIndex = 0,
-            prevLogTerm = 0,
-            entries = emptyList(),
-            leaderCommit = 0,
-        )
+    private fun fixture(currentTerm: Long = 0): Fixture {
+        val timer = RecordingTimer()
+        val follower = RaftNodeBuilder(
+            nodeId = "self",
+            peerIds = setOf("peer-1", "peer-2"),
+            persistentState = RaftPersistentState(currentTerm = currentTerm),
+            volatileState = RaftVolatileState(),
+            log = MemoryRaftLog(),
+            stateMachine = NoOpStateMachine(),
+            timer = timer,
+        ).build()
+        return Fixture(follower, timer)
+    }
 
-    private fun command() =
-        RaftCommand.Put(
-            key = byteArrayOf(1),
-            value = byteArrayOf(10),
-        )
-
-    private data class Fixture(
-        val node: RaftNode,
-        val timer: RecordingTimer,
+    private fun appendEntries(term: Long) = AppendEntriesRequest(
+        term = term,
+        leaderId = "leader",
+        prevLogIndex = 0,
+        prevLogTerm = 0,
+        entries = emptyList(),
+        leaderCommit = 0,
     )
+
+    private fun command() = RaftCommand.Put(
+        key = byteArrayOf(1),
+        value = byteArrayOf(10),
+    )
+
+    private class Fixture(
+        val follower: FollowerNode,
+        val timer: RecordingTimer,
+    ) {
+        lateinit var leader: LeaderNode
+    }
 
     private class RecordingTimer : RaftTimer {
         val events = mutableListOf<RaftTimeoutEvent>()

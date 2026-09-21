@@ -2,94 +2,89 @@ package net.kigawa.fortis.raft.node
 
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import net.kigawa.fortis.raft.RaftCommand
-import net.kigawa.fortis.raft.RaftPeerProgress
-import net.kigawa.fortis.raft.RaftRole
-import net.kigawa.fortis.raft.append.*
-import net.kigawa.fortis.raft.log.RaftLogEntry
+import net.kigawa.fortis.raft.RaftApplier
+import net.kigawa.fortis.raft.RaftCommitAdvancer
+import net.kigawa.fortis.raft.RaftPersistentState
+import net.kigawa.fortis.raft.RaftStateMachine
+import net.kigawa.fortis.raft.append.AppendEntriesHandler
+import net.kigawa.fortis.raft.append.AppendEntriesRequest
+import net.kigawa.fortis.raft.append.AppendEntriesResponse
+import net.kigawa.fortis.raft.follower.FollowerNode
+import net.kigawa.fortis.raft.log.RaftLog
+import net.kigawa.fortis.raft.vote.RaftVolatileState
 import net.kigawa.fortis.raft.vote.RequestVoteHandler
 import net.kigawa.fortis.raft.vote.RequestVoteRequest
 import net.kigawa.fortis.raft.vote.RequestVoteResponse
 
 abstract class RaftNode(
-    var peers: Map<String, RaftPeerProgress>,
-    val requestVoteHandler: RequestVoteHandler,
-    val appendEntriesHandler: AppendEntriesHandler,
-    val appendEntriesResponseHandler: AppendEntriesResponseHandler,
-    val appendEntriesFactory: AppendEntriesFactory,
-    val commandAppender: CommandAppender,
-    val electionStarter: ElectionStarter,
-    val requestVoteResponseHandler: RequestVoteResponseHandler,
+    val nodeId: String,
+    val peerIds: Set<String>,
+    val persistentState: RaftPersistentState,
+    val volatileState: RaftVolatileState,
+    val log: RaftLog,
+    val stateMachine: RaftStateMachine,
     val timer: RaftTimer,
 ) {
-    internal val mutex = Mutex()
-    private val votesGranted = mutableSetOf<String>()
-    var role: RaftRole = RaftRole.FOLLOWER
-        private set
+    private val mutex = Mutex()
+    private val applier = RaftApplier(volatileState, log, stateMachine)
+    private val requestVoteHandler = RequestVoteHandler(persistentState, log)
+    private val appendEntriesHandler = AppendEntriesHandler(
+        persistentState,
+        volatileState,
+        log,
+        applier,
+    )
 
-    private fun setRole(role: RaftRole) {
-        this.role = role
-    }
+    internal val commitAdvancer = RaftCommitAdvancer(
+        persistentState,
+        volatileState,
+        log,
+    )
+    internal val raftApplier: RaftApplier
+        get() = applier
 
-    suspend fun handleRequestVote(request: RequestVoteRequest): RequestVoteResponse = mutex.withLock {
-        requestVoteHandler.handle(request, ::setRole).also { response ->
-            if (response.voteGranted) {
-                timer.reset(RaftTimeoutEvent.Election)
-            }
+    suspend fun handleRequestVote(
+        request: RequestVoteRequest,
+    ): RaftNodeResult<RequestVoteResponse> = mutex.withLock {
+        val previousTerm = persistentState.currentTerm
+        val response = requestVoteHandler.handle(request)
+        if (response.voteGranted) {
+            timer.reset(RaftTimeoutEvent.Election)
         }
-    }
-
-    suspend fun handleAppendEntries(request: AppendEntriesRequest): AppendEntriesResponse = mutex.withLock {
-        appendEntriesHandler.handle(request, ::setRole).also { response ->
-            if (request.term >= response.term) {
-                timer.reset(RaftTimeoutEvent.Election)
-            }
+        val nextNode = if (
+            request.term > previousTerm && this !is FollowerNode
+        ) {
+            follower()
+        } else {
+            this
         }
+        RaftNodeResult(nextNode, response)
     }
 
-
-    suspend fun appendCommand(command: RaftCommand): RaftLogEntry = mutex.withLock {
-        commandAppender.append(command, role, peers.values)
-    }
-
-    suspend fun handleAppendEntriesResponse(
-        peerId: String, request: AppendEntriesRequest, response: AppendEntriesResponse,
-    ): Unit = mutex.withLock {
-        peers = appendEntriesResponseHandler.handle(peerId, request, response, role, peers, ::setRole)
-    }
-
-    suspend fun startElection(): RequestVoteRequest = mutex.withLock {
-        startElectionLocked()
-    }
-
-    suspend fun handleRequestVoteResponse(peerId: String, response: RequestVoteResponse): Unit = mutex.withLock {
-        val previousRole = role
-        peers = requestVoteResponseHandler.handle(peerId, response, peers, role, votesGranted, ::setRole)
-        if (previousRole != RaftRole.LEADER && role == RaftRole.LEADER) {
-            timer.reset(RaftTimeoutEvent.Heartbeat)
+    suspend fun handleAppendEntries(
+        request: AppendEntriesRequest,
+    ): RaftNodeResult<AppendEntriesResponse> = mutex.withLock {
+        val previousTerm = persistentState.currentTerm
+        val response = appendEntriesHandler.handle(request)
+        val validLeaderTerm = request.term >= previousTerm
+        if (validLeaderTerm) {
+            timer.reset(RaftTimeoutEvent.Election)
         }
+        val nextNode = if (validLeaderTerm && this !is FollowerNode) {
+            follower()
+        } else {
+            this
+        }
+        RaftNodeResult(nextNode, response)
     }
 
-    suspend fun onElectionTimeout(): RequestVoteRequest = mutex.withLock {
-        startElectionLocked()
-    }
-
-
-
-    private suspend fun startElectionLocked(): RequestVoteRequest {
-        val request = electionStarter.startElection(
-            votesGranted, peers
-        ).apply { role = second }
-            .apply { peers = third }
-            .first
-        timer.reset(
-            if (role == RaftRole.LEADER) {
-                RaftTimeoutEvent.Heartbeat
-            } else {
-                RaftTimeoutEvent.Election
-            }
-        )
-        return request
-    }
-
+    internal fun follower(): FollowerNode = FollowerNode(
+        nodeId,
+        peerIds,
+        persistentState,
+        volatileState,
+        log,
+        stateMachine,
+        timer,
+    )
 }

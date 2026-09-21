@@ -2,25 +2,28 @@ package net.kigawa.fortis.raft.transport
 
 import net.kigawa.fortis.raft.append.AppendEntriesRequest
 import net.kigawa.fortis.raft.append.AppendEntriesResponse
-import net.kigawa.fortis.raft.node.RaftNode
+import net.kigawa.fortis.raft.runtime.RaftRuntime
 import net.kigawa.fortis.raft.vote.RequestVoteRequest
 import net.kigawa.fortis.raft.vote.RequestVoteResponse
 
-class LocalRaftTransport(
-    private val nodes: Map<String, RaftNode>,
-) : RaftTransport {
+class LocalRaftTransport : RaftTransport {
+    private val runtimes = mutableMapOf<String, RaftRuntime>()
+
+    fun register(nodeId: String, runtime: RaftRuntime) {
+        require(nodeId !in runtimes) { "Node already registered: $nodeId" }
+        runtimes[nodeId] = runtime
+    }
+
     override suspend fun requestVote(
         peerId: String,
         request: RequestVoteRequest,
-    ): RequestVoteResponse = node(peerId).handleRequestVote(request)
+    ): RequestVoteResponse = runtime(peerId).handleRequestVote(request)
 
     override suspend fun appendEntries(
         peerId: String,
         request: AppendEntriesRequest,
-    ): AppendEntriesResponse = node(peerId).handleAppendEntries(request)
+    ): AppendEntriesResponse = runtime(peerId).handleAppendEntries(request)
 
-    private fun node(peerId: String): RaftNode =
-        requireNotNull(nodes[peerId]) {
-            "Unknown peer: $peerId"
-        }
+    private fun runtime(peerId: String): RaftRuntime =
+        requireNotNull(runtimes[peerId]) { "Unknown peer: $peerId" }
 }

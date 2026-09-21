@@ -2,25 +2,21 @@ package net.kigawa.fortis.raft
 
 import kotlinx.coroutines.test.runTest
 import net.kigawa.fortis.raft.append.AppendEntriesResponse
+import net.kigawa.fortis.raft.candidate.CandidateNode
+import net.kigawa.fortis.raft.follower.FollowerNode
+import net.kigawa.fortis.raft.leader.LeaderNode
 import net.kigawa.fortis.raft.log.MemoryRaftLog
-import net.kigawa.fortis.raft.node.RaftNode
 import net.kigawa.fortis.raft.node.RaftNodeBuilder
 import net.kigawa.fortis.raft.vote.RaftVolatileState
 import net.kigawa.fortis.raft.vote.RequestVoteResponse
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
+import kotlin.test.assertIs
 
 class RaftNodeCommandTest {
     @Test
-    fun followerCannotAppendCommand() = runTest {
-        val fixture = fixture()
-
-        assertFailsWith<IllegalStateException> {
-            fixture.node.appendCommand(command())
-        }
-
-        assertEquals(0L, fixture.log.lastIndex())
+    fun builderCreatesFollowerWithoutCommandApi() {
+        assertIs<FollowerNode>(fixture().follower)
     }
 
     @Test
@@ -28,7 +24,7 @@ class RaftNodeCommandTest {
         val fixture = electedLeader()
         val command = command()
 
-        val entry = fixture.node.appendCommand(command)
+        val entry = fixture.leader.appendCommand(command)
 
         assertEquals(1L, entry.index)
         assertEquals(1L, entry.term)
@@ -40,17 +36,17 @@ class RaftNodeCommandTest {
     fun majorityReplicationCommitsAndAppliesLeaderCommand() = runTest {
         val fixture = electedLeader()
         val command = command()
-        fixture.node.appendCommand(command)
+        fixture.leader.appendCommand(command)
         assertEquals(0L, fixture.volatileState.commitIndex)
-        assertEquals(emptyList(), fixture.stateMachine.applied)
 
-        val request = fixture.node.createAppendEntries("peer-1")
-        fixture.node.handleAppendEntriesResponse(
-            peerId = "peer-1",
-            request = request,
-            response = AppendEntriesResponse(term = 1, success = true),
+        val request = fixture.leader.createAppendEntries("peer-1")
+        val nextNode = fixture.leader.handleAppendEntriesResponse(
+            "peer-1",
+            request,
+            AppendEntriesResponse(term = 1, success = true),
         )
 
+        assertIs<LeaderNode>(nextNode)
         assertEquals(1L, fixture.volatileState.commitIndex)
         assertEquals(1L, fixture.volatileState.lastApplied)
         assertEquals(listOf<RaftCommand>(command), fixture.stateMachine.applied)
@@ -59,64 +55,74 @@ class RaftNodeCommandTest {
     @Test
     fun singleNodeLeaderCommitsAndAppliesCommandImmediately() = runTest {
         val fixture = fixture(peerIds = emptyList())
-        fixture.node.startElection()
+        val result = fixture.follower.onElectionTimeout()
+        val leader = assertIs<LeaderNode>(result.node)
         val command = command()
 
-        fixture.node.appendCommand(command)
+        leader.appendCommand(command)
 
-        assertEquals(RaftRole.LEADER, fixture.node.role)
         assertEquals(1L, fixture.volatileState.commitIndex)
         assertEquals(1L, fixture.volatileState.lastApplied)
         assertEquals(listOf<RaftCommand>(command), fixture.stateMachine.applied)
     }
 
-    private suspend fun electedLeader(): Fixture =
-        fixture().also { fixture ->
-            fixture.node.startElection()
-            fixture.node.handleRequestVoteResponse(
-                peerId = "peer-1",
-                response = RequestVoteResponse(term = 1, voteGranted = true),
-            )
-            assertEquals(RaftRole.LEADER, fixture.node.role)
-        }
+    @Test
+    fun higherTermAppendResponseReplacesLeaderWithFollower() = runTest {
+        val fixture = electedLeader()
+        val request = fixture.leader.createAppendEntries("peer-1")
+
+        val nextNode = fixture.leader.handleAppendEntriesResponse(
+            "peer-1",
+            request,
+            AppendEntriesResponse(term = 2, success = false),
+        )
+
+        assertIs<FollowerNode>(nextNode)
+    }
+
+    private suspend fun electedLeader(): Fixture {
+        val fixture = fixture()
+        val election = fixture.follower.onElectionTimeout()
+        val candidate = assertIs<CandidateNode>(election.node)
+        fixture.leader = assertIs<LeaderNode>(
+            candidate.handleRequestVoteResponse(
+                "peer-1",
+                RequestVoteResponse(term = 1, voteGranted = true),
+            ),
+        )
+        return fixture
+    }
 
     private fun fixture(
         peerIds: List<String> = listOf("peer-1", "peer-2"),
     ): Fixture {
-        val peers = peerIds.associateWith {
-            RaftPeerProgress(nextIndex = 1)
-        }.toMutableMap()
-        val persistentState = RaftPersistentState()
         val volatileState = RaftVolatileState()
         val log = MemoryRaftLog()
         val stateMachine = RecordingStateMachine()
-        return Fixture(
+        val follower = RaftNodeBuilder(
+            nodeId = "self",
+            peerIds = peerIds.toSet(),
+            persistentState = RaftPersistentState(),
             volatileState = volatileState,
             log = log,
             stateMachine = stateMachine,
-            node = RaftNodeBuilder(
-                nodeId = "self",
-                peers = peers,
-                persistentState = persistentState,
-                volatileState = volatileState,
-                log = log,
-                stateMachine = stateMachine,
-            ).build(),
-        )
+        ).build()
+        return Fixture(volatileState, log, stateMachine, follower)
     }
 
-    private fun command() =
-        RaftCommand.Put(
-            key = byteArrayOf(1),
-            value = byteArrayOf(10),
-        )
+    private fun command() = RaftCommand.Put(
+        key = byteArrayOf(1),
+        value = byteArrayOf(10),
+    )
 
-    private data class Fixture(
+    private class Fixture(
         val volatileState: RaftVolatileState,
         val log: MemoryRaftLog,
         val stateMachine: RecordingStateMachine,
-        val node: RaftNode,
-    )
+        val follower: FollowerNode,
+    ) {
+        lateinit var leader: LeaderNode
+    }
 
     private class RecordingStateMachine : RaftStateMachine {
         val applied = mutableListOf<RaftCommand>()
