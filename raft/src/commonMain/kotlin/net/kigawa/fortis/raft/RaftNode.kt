@@ -9,7 +9,7 @@ import net.kigawa.fortis.raft.vote.RequestVoteResponse
 
 class RaftNode(
     val nodeId: String,
-    private val peers: Map<String, RaftPeerProgress>,
+    private val peers: MutableMap<String, RaftPeerProgress>,
     private val persistentState: RaftPersistentState,
     private val volatileState: RaftVolatileState,
     private val log: RaftLog,
@@ -17,8 +17,7 @@ class RaftNode(
 ) {
     private val votesGranted =
         mutableSetOf<String>()
-    private val peerProgress =
-        mutableMapOf<String, RaftPeerProgress>()
+
     var role: RaftRole = RaftRole.FOLLOWER
         private set
     private val requestVoteHandler =
@@ -59,7 +58,20 @@ class RaftNode(
     suspend fun handleRequestVote(
         request: RequestVoteRequest,
     ): RequestVoteResponse {
-        TODO()
+        val previousTerm =
+            persistentState.currentTerm
+
+        val response =
+            requestVoteHandler.handle(request)
+
+        if (
+            persistentState.currentTerm >
+            previousTerm
+        ) {
+            role = RaftRole.FOLLOWER
+        }
+
+        return response
     }
 
     suspend fun handleAppendEntries(
@@ -78,7 +90,18 @@ class RaftNode(
     suspend fun createAppendEntries(
         peerId: String,
     ): AppendEntriesRequest {
-        TODO()
+        check(role == RaftRole.LEADER) {
+            "Only leader can create AppendEntries"
+        }
+
+        val progress =
+            requireNotNull(peers[peerId]) {
+                "Unknown peer: $peerId"
+            }
+
+        return appendEntriesFactory.create(
+            progress,
+        )
     }
 
     suspend fun handleAppendEntriesResponse(
@@ -86,6 +109,29 @@ class RaftNode(
         request: AppendEntriesRequest,
         response: AppendEntriesResponse,
     ) {
-        TODO()
+        if (role != RaftRole.LEADER) {
+            return
+        }
+        val progress =
+            requireNotNull(peers[peerId]) {
+                "Unknown peer: $peerId"
+            }
+
+        val previousTerm =
+            persistentState.currentTerm
+
+        appendEntriesResponseHandler.handle(
+            progress = progress,
+            peers = peers.values,
+            request = request,
+            response = response,
+        )
+
+        if (
+            persistentState.currentTerm >
+            previousTerm
+        ) {
+            role = RaftRole.FOLLOWER
+        }
     }
 }
