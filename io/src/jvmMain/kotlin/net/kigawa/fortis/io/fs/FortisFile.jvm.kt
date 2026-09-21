@@ -8,10 +8,25 @@ import java.nio.file.StandardOpenOption
 actual suspend fun FortisFile.openRead(
     block: suspend (input: FsInput) -> Unit,
 ) {
-    withContext(Dispatchers.IO) {
-        FileChannel.open(path.toJvmPath(), StandardOpenOption.READ).use { channel ->
-            block(JvmFsInput(this@openRead, channel))
+    try {
+        withContext(Dispatchers.IO) {
+            FileChannel.open(
+                path.toJvmPath(),
+                StandardOpenOption.READ,
+            ).use { channel ->
+                block(
+                    JvmFsInput(
+                        this@openRead,
+                        channel,
+                    )
+                )
+            }
         }
+    } catch (e: NoSuchFileException) {
+        throw FsFileNotFoundException(
+            file = this,
+            cause = e,
+        )
     }
 }
 

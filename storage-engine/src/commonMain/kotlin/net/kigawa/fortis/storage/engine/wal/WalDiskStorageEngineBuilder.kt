@@ -3,20 +3,10 @@ package net.kigawa.fortis.storage.engine.wal
 import net.kigawa.fortis.storage.engine.memory.MemoryStorageEngine
 import net.kigawa.fortis.storage.engine.wal.codec.WalOperation
 
-class WalDiskStorageEngineBuilder {
-    private var wal: Wal? = null
-    private var memory: MemoryStorageEngine? = null
-    fun wal(
-        wal: Wal,
-    ): WalDiskStorageEngineBuilder = apply {
-        this.wal = wal
-    }
-
-    fun memory(
-        memory: MemoryStorageEngine,
-    ): WalDiskStorageEngineBuilder = apply {
-        this.memory = memory
-    }
+data class WalDiskStorageEngineBuilder(
+    private val wal: Wal?,
+    private val memory: MemoryStorageEngine?,
+) {
 
     suspend fun build(): WalDiskStorageEngine {
         val wal = requireNotNull(wal) {
