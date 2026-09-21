@@ -3,6 +3,8 @@ package net.kigawa.fortis.raft
 import kotlinx.coroutines.test.runTest
 import net.kigawa.fortis.raft.log.MemoryRaftLog
 import net.kigawa.fortis.raft.log.RaftLogEntry
+import net.kigawa.fortis.raft.node.RaftNode
+import net.kigawa.fortis.raft.node.RaftNodeBuilder
 import net.kigawa.fortis.raft.vote.RaftVolatileState
 import net.kigawa.fortis.raft.vote.RequestVoteResponse
 import kotlin.test.Test
@@ -124,14 +126,14 @@ class RaftNodeElectionTest {
             persistentState = persistentState,
             peers = peers,
             log = log,
-            node = RaftNode(
+            node = RaftNodeBuilder(
                 nodeId = "self",
                 peers = peers,
                 persistentState = persistentState,
                 volatileState = RaftVolatileState(),
                 log = log,
                 stateMachine = RecordingStateMachine(),
-            ),
+            ).build(),
         )
     }
 

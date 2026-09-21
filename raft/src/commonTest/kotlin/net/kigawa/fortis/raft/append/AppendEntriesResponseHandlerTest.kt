@@ -1,10 +1,12 @@
 package net.kigawa.fortis.raft.append
 
 import kotlinx.coroutines.test.runTest
+import net.kigawa.fortis.raft.RaftApplier
 import net.kigawa.fortis.raft.RaftCommand
 import net.kigawa.fortis.raft.RaftCommitAdvancer
 import net.kigawa.fortis.raft.RaftPeerProgress
 import net.kigawa.fortis.raft.RaftPersistentState
+import net.kigawa.fortis.raft.RaftStateMachine
 import net.kigawa.fortis.raft.log.MemoryRaftLog
 import net.kigawa.fortis.raft.log.RaftLogEntry
 import net.kigawa.fortis.raft.vote.RaftVolatileState
@@ -26,11 +28,15 @@ class AppendEntriesResponseHandlerTest {
         val progress = RaftPeerProgress(nextIndex = 1)
 
         fixture.handler.handle(
-            progress = progress,
-            peers = listOf(progress, RaftPeerProgress(nextIndex = 1)),
+            peerId = "peer",
+            peers = mapOf(
+                "peer" to progress,
+                "other" to RaftPeerProgress(nextIndex = 1),
+            ),
             request = request(term = 2, entries = entries),
             response = AppendEntriesResponse(term = 2, success = true),
-        )
+            role = net.kigawa.fortis.raft.RaftRole.LEADER,
+        ) {}
 
         assertEquals(2L, progress.matchIndex)
         assertEquals(3L, progress.nextIndex)
@@ -42,11 +48,12 @@ class AppendEntriesResponseHandlerTest {
         val progress = RaftPeerProgress(nextIndex = 5)
 
         fixture.handler.handle(
-            progress = progress,
-            peers = listOf(progress),
+            peerId = "peer",
+            peers = mapOf("peer" to progress),
             request = request(term = 2),
             response = AppendEntriesResponse(term = 2, success = false),
-        )
+            role = net.kigawa.fortis.raft.RaftRole.LEADER,
+        ) {}
 
         assertEquals(4L, progress.nextIndex)
         assertEquals(0L, progress.matchIndex)
@@ -58,11 +65,12 @@ class AppendEntriesResponseHandlerTest {
         val progress = RaftPeerProgress(nextIndex = 1)
 
         fixture.handler.handle(
-            progress = progress,
-            peers = listOf(progress),
+            peerId = "peer",
+            peers = mapOf("peer" to progress),
             request = request(term = 2),
             response = AppendEntriesResponse(term = 2, success = false),
-        )
+            role = net.kigawa.fortis.raft.RaftRole.LEADER,
+        ) {}
 
         assertEquals(1L, progress.nextIndex)
     }
@@ -76,11 +84,12 @@ class AppendEntriesResponseHandlerTest {
         val progress = RaftPeerProgress(nextIndex = 3, matchIndex = 2)
 
         fixture.handler.handle(
-            progress = progress,
-            peers = listOf(progress),
+            peerId = "peer",
+            peers = mapOf("peer" to progress),
             request = request(term = 2),
             response = AppendEntriesResponse(term = 3, success = false),
-        )
+            role = net.kigawa.fortis.raft.RaftRole.LEADER,
+        ) {}
 
         assertEquals(3L, fixture.persistentState.currentTerm)
         assertNull(fixture.persistentState.votedFor)
@@ -104,6 +113,11 @@ class AppendEntriesResponseHandlerTest {
                     persistentState = persistentState,
                     volatileState = volatileState,
                     log = log,
+                ),
+                applier = RaftApplier(
+                    volatileState = volatileState,
+                    log = log,
+                    stateMachine = NoOpStateMachine(),
                 ),
             ),
         )
@@ -133,4 +147,8 @@ class AppendEntriesResponseHandlerTest {
         val log: MemoryRaftLog,
         val handler: AppendEntriesResponseHandler,
     )
+
+    private class NoOpStateMachine : RaftStateMachine {
+        override suspend fun apply(command: RaftCommand) = Unit
+    }
 }

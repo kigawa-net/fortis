@@ -15,7 +15,7 @@ class RequestVoteHandlerTest {
     @Test
     fun olderTermIsRejected() = runTest {
         val state = RaftPersistentState(currentTerm = 2)
-        val response = handler(state).handle(request(term = 1))
+        val response = handler(state).handleLock(request(term = 1))
 
         assertFalse(response.voteGranted)
         assertEquals(2L, response.term)
@@ -33,7 +33,7 @@ class RequestVoteHandlerTest {
             it.append(entry(index = 1, term = 2))
         }
 
-        val response = handler(state, log).handle(
+        val response = handler(state, log).handleLock(
             request(
                 term = 2,
                 candidateId = "new-candidate",
@@ -52,7 +52,7 @@ class RequestVoteHandlerTest {
     fun grantsVoteWhenNotYetVoted() = runTest {
         val state = RaftPersistentState(currentTerm = 1)
 
-        val response = handler(state).handle(request(term = 1))
+        val response = handler(state).handleLock(request(term = 1))
 
         assertTrue(response.voteGranted)
         assertEquals("candidate", state.votedFor)
@@ -65,7 +65,7 @@ class RequestVoteHandlerTest {
             votedFor = "candidate",
         )
 
-        val response = handler(state).handle(request(term = 1))
+        val response = handler(state).handleLock(request(term = 1))
 
         assertTrue(response.voteGranted)
         assertEquals("candidate", state.votedFor)
@@ -78,7 +78,7 @@ class RequestVoteHandlerTest {
             votedFor = "first-candidate",
         )
 
-        val response = handler(state).handle(
+        val response = handler(state).handleLock(
             request(term = 1, candidateId = "second-candidate")
         )
 
@@ -93,7 +93,7 @@ class RequestVoteHandlerTest {
             it.append(entry(index = 1, term = 2))
         }
 
-        val response = handler(state, log).handle(
+        val response = handler(state, log).handleLock(
             request(
                 term = 3,
                 lastLogIndex = 10,
@@ -113,7 +113,7 @@ class RequestVoteHandlerTest {
             it.append(entry(index = 2, term = 1))
         }
 
-        val response = handler(state, log).handle(
+        val response = handler(state, log).handleLock(
             request(
                 term = 3,
                 lastLogIndex = 1,
@@ -133,7 +133,7 @@ class RequestVoteHandlerTest {
             it.append(entry(index = 2, term = 2))
         }
 
-        val response = handler(state, log).handle(
+        val response = handler(state, log).handleLock(
             request(
                 term = 3,
                 lastLogIndex = 1,
@@ -153,7 +153,7 @@ class RequestVoteHandlerTest {
             it.append(entry(index = 2, term = 2))
         }
 
-        val response = handler(state, log).handle(
+        val response = handler(state, log).handleLock(
             request(
                 term = 3,
                 lastLogIndex = 2,
@@ -168,7 +168,7 @@ class RequestVoteHandlerTest {
     private fun handler(
         state: RaftPersistentState,
         log: MemoryRaftLog = MemoryRaftLog(),
-    ) = RequestVoteHandler(state, log)
+    ) = RequestVoteHandler(state, log, state)
 
     private fun request(
         term: Long,

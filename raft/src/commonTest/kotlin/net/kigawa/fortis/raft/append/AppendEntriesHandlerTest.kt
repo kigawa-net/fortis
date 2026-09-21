@@ -1,6 +1,7 @@
 package net.kigawa.fortis.raft.append
 
 import kotlinx.coroutines.test.runTest
+import net.kigawa.fortis.raft.RaftApplier
 import net.kigawa.fortis.raft.RaftCommand
 import net.kigawa.fortis.raft.RaftPersistentState
 import net.kigawa.fortis.raft.RaftStateMachine
@@ -18,7 +19,7 @@ class AppendEntriesHandlerTest {
     fun olderTermIsRejected() = runTest {
         val fixture = fixture(currentTerm = 2)
 
-        val response = fixture.handler.handle(request(term = 1))
+        val response = fixture.handler.handleLock(request(term = 1))
 
         assertFalse(response.success)
         assertEquals(2L, response.term)
@@ -33,7 +34,7 @@ class AppendEntriesHandlerTest {
             votedFor = "candidate",
         )
 
-        val response = fixture.handler.handle(request(term = 2))
+        val response = fixture.handler.handleLock(request(term = 2))
 
         assertTrue(response.success)
         assertEquals(2L, response.term)
@@ -45,7 +46,7 @@ class AppendEntriesHandlerTest {
     fun zeroPreviousLogIndexIsAccepted() = runTest {
         val fixture = fixture(currentTerm = 1)
 
-        val response = fixture.handler.handle(
+        val response = fixture.handler.handleLock(
             request(
                 term = 1,
                 prevLogIndex = 0,
@@ -60,7 +61,7 @@ class AppendEntriesHandlerTest {
     fun missingPreviousEntryIsRejected() = runTest {
         val fixture = fixture(currentTerm = 1)
 
-        val response = fixture.handler.handle(
+        val response = fixture.handler.handleLock(
             request(
                 term = 1,
                 prevLogIndex = 1,
@@ -76,7 +77,7 @@ class AppendEntriesHandlerTest {
         val fixture = fixture(currentTerm = 2)
         fixture.log.append(entry(index = 1, term = 1))
 
-        val response = fixture.handler.handle(
+        val response = fixture.handler.handleLock(
             request(
                 term = 2,
                 prevLogIndex = 1,
@@ -94,7 +95,7 @@ class AppendEntriesHandlerTest {
         fixture.log.append(entry(index = 1, term = 1))
         val appended = entry(index = 2, term = 2)
 
-        val response = fixture.handler.handle(
+        val response = fixture.handler.handleLock(
             request(
                 term = 2,
                 prevLogIndex = 1,
@@ -116,7 +117,7 @@ class AppendEntriesHandlerTest {
         fixture.log.append(entry(index = 3, term = 1))
         val replacement = entry(index = 2, term = 2)
 
-        val response = fixture.handler.handle(
+        val response = fixture.handler.handleLock(
             request(
                 term = 2,
                 prevLogIndex = 1,
@@ -137,7 +138,7 @@ class AppendEntriesHandlerTest {
         val existing = entry(index = 1, term = 1)
         fixture.log.append(existing)
 
-        val response = fixture.handler.handle(
+        val response = fixture.handler.handleLock(
             request(
                 term = 2,
                 prevLogIndex = 1,
@@ -155,7 +156,7 @@ class AppendEntriesHandlerTest {
     fun leaderCommitAdvancesCommitIndex() = runTest {
         val fixture = fixtureWithEntries(2)
 
-        val response = fixture.handler.handle(
+        val response = fixture.handler.handleLock(
             request(
                 term = 2,
                 prevLogIndex = 2,
@@ -172,7 +173,7 @@ class AppendEntriesHandlerTest {
     fun committedEntriesAreAppliedToStateMachine() = runTest {
         val fixture = fixtureWithEntries(2)
 
-        fixture.handler.handle(
+        fixture.handler.handleLock(
             request(
                 term = 2,
                 prevLogIndex = 2,
@@ -192,7 +193,7 @@ class AppendEntriesHandlerTest {
     fun leaderCommitBeyondLastIndexCommitsOnlyThroughLastEntry() = runTest {
         val fixture = fixtureWithEntries(2)
 
-        fixture.handler.handle(
+        fixture.handler.handleLock(
             request(
                 term = 2,
                 prevLogIndex = 2,
@@ -233,7 +234,11 @@ class AppendEntriesHandlerTest {
                 persistentState = persistentState,
                 volatileState = volatileState,
                 log = log,
-                stateMachine = stateMachine,
+                applier = RaftApplier(
+                    volatileState = volatileState,
+                    log = log,
+                    stateMachine = stateMachine,
+                ),
             ),
         )
     }

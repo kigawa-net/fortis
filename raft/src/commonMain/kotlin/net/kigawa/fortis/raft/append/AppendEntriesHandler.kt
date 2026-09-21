@@ -2,8 +2,9 @@ package net.kigawa.fortis.raft.append
 
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import net.kigawa.fortis.raft.RaftApplier
 import net.kigawa.fortis.raft.RaftPersistentState
-import net.kigawa.fortis.raft.RaftStateMachine
+import net.kigawa.fortis.raft.RaftRole
 import net.kigawa.fortis.raft.log.RaftLog
 import net.kigawa.fortis.raft.log.RaftLogEntry
 import net.kigawa.fortis.raft.vote.RaftVolatileState
@@ -12,11 +13,24 @@ class AppendEntriesHandler(
     private val persistentState: RaftPersistentState,
     private val volatileState: RaftVolatileState,
     private val log: RaftLog,
-    private val stateMachine: RaftStateMachine,
+    private val applier: RaftApplier,
 ) {
     private val mutex = Mutex()
 
     suspend fun handle(
+        request: AppendEntriesRequest, setRole: (RaftRole) -> Unit,
+    ): AppendEntriesResponse {
+        val response =
+            handleLock(request)
+
+        if (request.term >= persistentState.currentTerm) {
+            setRole(RaftRole.FOLLOWER)
+        }
+
+        return response
+    }
+
+    internal suspend fun handleLock(
         request: AppendEntriesRequest,
     ): AppendEntriesResponse = mutex.withLock {
         if (request.term < persistentState.currentTerm) {
@@ -71,14 +85,7 @@ class AppendEntriesHandler(
                 minOf(leaderCommit, log.lastIndex())
         }
 
-        while (volatileState.lastApplied < volatileState.commitIndex) {
-            val nextIndex = volatileState.lastApplied + 1
-            val entry = checkNotNull(log.get(nextIndex)) {
-                "Committed Raft log entry is missing at index $nextIndex"
-            }
-            stateMachine.apply(entry.command)
-            volatileState.lastApplied = nextIndex
-        }
+        applier.applyCommitted()
     }
 
     private fun response(success: Boolean) =

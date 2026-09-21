@@ -3,15 +3,36 @@ package net.kigawa.fortis.raft.vote
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import net.kigawa.fortis.raft.RaftPersistentState
+import net.kigawa.fortis.raft.RaftRole
 import net.kigawa.fortis.raft.log.RaftLog
 
 
-class RequestVoteHandler(
-    private val state: RaftPersistentState,
-    private val log: RaftLog,
+data class RequestVoteHandler(
+    val state: RaftPersistentState,
+    val log: RaftLog,
+    val persistentState: RaftPersistentState,
 ) {
     private val mutex = Mutex()
     suspend fun handle(
+        request: RequestVoteRequest,
+        setRole: (RaftRole) -> Unit,
+    ): RequestVoteResponse {
+        val previousTerm =
+            persistentState.currentTerm
+
+        val response = handleLock(request)
+
+        if (
+            persistentState.currentTerm >
+            previousTerm
+        ) {
+            setRole(RaftRole.FOLLOWER)
+        }
+
+        return response
+    }
+
+    internal suspend fun handleLock(
         request: RequestVoteRequest,
     ): RequestVoteResponse = mutex.withLock {
         if (request.term < state.currentTerm) {

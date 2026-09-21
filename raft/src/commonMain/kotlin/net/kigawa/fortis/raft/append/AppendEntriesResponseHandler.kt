@@ -1,20 +1,54 @@
 package net.kigawa.fortis.raft.append
 
 
-import net.kigawa.fortis.raft.RaftCommitAdvancer
-import net.kigawa.fortis.raft.RaftPeerProgress
-import net.kigawa.fortis.raft.RaftPersistentState
+import net.kigawa.fortis.raft.*
 
 class AppendEntriesResponseHandler(
     private val persistentState: RaftPersistentState,
     private val commitAdvancer: RaftCommitAdvancer,
+    private val applier: RaftApplier,
 ) {
+
     suspend fun handle(
+        peerId: String,
+        request: AppendEntriesRequest,
+        response: AppendEntriesResponse,
+        role: RaftRole,
+        peers: Map<String, RaftPeerProgress>,
+        setRole: (RaftRole) -> Unit,
+    ) {
+        if (role != RaftRole.LEADER) {
+            return
+        }
+        val progress =
+            requireNotNull(peers[peerId]) {
+                "Unknown peer: $peerId"
+            }
+
+        val previousTerm =
+            persistentState.currentTerm
+
+        handleInternal(
+            progress = progress,
+            peers = peers.values,
+            request = request,
+            response = response,
+        )
+
+        if (
+            persistentState.currentTerm >
+            previousTerm
+        ) {
+            setRole(RaftRole.FOLLOWER)
+        }
+    }
+
+    private suspend fun handleInternal(
         progress: RaftPeerProgress,
         peers: Collection<RaftPeerProgress>,
         request: AppendEntriesRequest,
         response: AppendEntriesResponse,
-    ){
+    ) {
         if (response.term > persistentState.currentTerm) {
             persistentState.currentTerm = response.term
             persistentState.votedFor = null
@@ -41,5 +75,6 @@ class AppendEntriesResponseHandler(
             progress.matchIndex + 1
 
         commitAdvancer.advance(peers)
+        applier.applyCommitted()
     }
 }
