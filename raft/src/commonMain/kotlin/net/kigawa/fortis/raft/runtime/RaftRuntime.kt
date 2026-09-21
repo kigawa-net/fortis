@@ -12,6 +12,7 @@ import net.kigawa.fortis.raft.log.RaftLogEntry
 import net.kigawa.fortis.raft.node.RaftNode
 import net.kigawa.fortis.raft.node.RaftTimeoutEvent
 import net.kigawa.fortis.raft.transport.RaftTransport
+import net.kigawa.fortis.raft.transport.RaftTransportException
 import net.kigawa.fortis.raft.vote.RequestVoteRequest
 import net.kigawa.fortis.raft.vote.RequestVoteResponse
 
@@ -60,7 +61,11 @@ class RaftRuntime(
 
         for (peerId in node.peerIds) {
             val candidate = node as? CandidateNode ?: break
-            val response = transport.requestVote(peerId, result.value)
+            val response = try {
+                transport.requestVote(peerId, result.value)
+            } catch (_: RaftTransportException) {
+                continue
+            }
             node = candidate.handleRequestVoteResponse(peerId, response)
         }
     }
@@ -102,7 +107,11 @@ class RaftRuntime(
         while (true) {
             val leader = node as? LeaderNode ?: return
             val currentRequest = request ?: leader.createAppendEntries(peerId)
-            val response = transport.appendEntries(peerId, currentRequest)
+            val response = try {
+                transport.appendEntries(peerId, currentRequest)
+            } catch (_: RaftTransportException) {
+                return
+            }
             node = leader.handleAppendEntriesResponse(
                 peerId,
                 currentRequest,

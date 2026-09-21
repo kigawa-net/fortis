@@ -9,6 +9,27 @@ data class DiskCodecDecoder(
     fun decodeHeader(
         data: ByteArray,
     ): DiskRecordHeader {
+        validateFirst(data)
+        val operation = setOf(DiskOperation.Delete, DiskOperation.Put)
+            .find { it.code == data[5] }
+            ?: throw IllegalArgumentException(
+                "Unknown disk operation: ${data[5]}"
+            )
+        val reader = DiskCodecReader(data)
+        val keyLength = reader.readInt(6)
+        val valueLength = reader.readInt(10)
+
+        require(keyLength >= 0)
+
+        operation.validateValueLength(valueLength)
+
+        return DiskRecordHeader(
+            operation = operation,
+            keyLength = keyLength,
+            valueLength = valueLength,
+        )
+    }
+    fun validateFirst(data: ByteArray) {
         require(data.size >= headerSize)
 
         require(
@@ -23,28 +44,5 @@ data class DiskCodecDecoder(
         require(data[4] == version) {
             "Unsupported disk record version: ${data[4]}"
         }
-
-        val reader = DiskCodecReader(data)
-        val operation =
-            when (data[5]) {
-                put -> DiskOperation.Put
-                delete -> DiskOperation.Delete
-                else -> throw IllegalArgumentException(
-                    "Unknown disk operation: ${data[5]}"
-                )
-            }
-
-        val keyLength = reader.readInt(6)
-        val valueLength = reader.readInt(10)
-
-        require(keyLength >= 0)
-
-        operation.validateValueLength(valueLength)
-
-        return DiskRecordHeader(
-            operation = operation,
-            keyLength = keyLength,
-            valueLength = valueLength,
-        )
     }
 }

@@ -11,6 +11,7 @@ import net.kigawa.fortis.raft.log.MemoryRaftLog
 import net.kigawa.fortis.raft.log.RaftLogEntry
 import net.kigawa.fortis.raft.node.RaftNodeBuilder
 import net.kigawa.fortis.raft.transport.LocalRaftTransport
+import net.kigawa.fortis.raft.transport.RaftPeerUnavailableException
 import net.kigawa.fortis.raft.transport.RaftTransport
 import net.kigawa.fortis.raft.vote.RaftVolatileState
 import net.kigawa.fortis.raft.vote.RequestVoteRequest
@@ -20,6 +21,89 @@ import kotlin.test.assertEquals
 import kotlin.test.assertIs
 
 class RaftRuntimeIntegrationTest {
+    @Test
+    fun oneUnavailablePeerDoesNotPreventElection() = runTest {
+        val cluster = cluster()
+        cluster.transport.unavailablePeers.add("node-2")
+
+        cluster.nodes.getValue("node-1").runtime.onElectionTimeout()
+
+        assertIs<LeaderNode>(cluster.nodes.getValue("node-1").runtime.currentNode)
+        assertEquals(listOf("node-2", "node-3"), cluster.transport.voteAttempts)
+    }
+
+    @Test
+    fun oneUnavailablePeerStillAllowsMajorityCommit() = runTest {
+        val cluster = cluster()
+        cluster.transport.unavailablePeers.add("node-2")
+        val leader = cluster.nodes.getValue("node-1")
+        leader.runtime.onElectionTimeout()
+        val command = RaftCommand.Put(byteArrayOf(1), byteArrayOf(10))
+
+        leader.runtime.appendCommand(command)
+
+        assertEquals(1L, leader.volatileState.commitIndex)
+        assertEquals(listOf<RaftCommand>(command), leader.stateMachine.applied)
+        assertEquals(0L, cluster.nodes.getValue("node-2").log.lastIndex())
+        assertEquals(command, cluster.nodes.getValue("node-3").log.get(1)?.command)
+    }
+
+    @Test
+    fun twoUnavailablePeersAppendLocallyWithoutCommit() = runTest {
+        val cluster = cluster()
+        val leader = cluster.nodes.getValue("node-1")
+        leader.runtime.onElectionTimeout()
+        cluster.transport.unavailablePeers.addAll(listOf("node-2", "node-3"))
+        val command = RaftCommand.Put(byteArrayOf(1), byteArrayOf(10))
+
+        leader.runtime.appendCommand(command)
+
+        assertIs<LeaderNode>(leader.runtime.currentNode)
+        assertEquals(command, leader.log.get(1)?.command)
+        assertEquals(0L, leader.volatileState.commitIndex)
+        assertEquals(0L, leader.volatileState.lastApplied)
+        assertEquals(emptyList(), leader.stateMachine.applied)
+    }
+
+    @Test
+    fun unreachableHeartbeatPeerDoesNotDemoteLeader() = runTest {
+        val cluster = cluster()
+        val leader = cluster.nodes.getValue("node-1")
+        leader.runtime.onElectionTimeout()
+        cluster.transport.unavailablePeers.add("node-2")
+        cluster.transport.appendAttempts.clear()
+
+        leader.runtime.onHeartbeatTimeout()
+
+        assertIs<LeaderNode>(leader.runtime.currentNode)
+        assertEquals(listOf("node-2", "node-3"), cluster.transport.appendAttempts)
+    }
+
+    @Test
+    fun recoveredFollowerCatchesUpOnHeartbeat() = runTest {
+        val cluster = cluster()
+        val leader = cluster.nodes.getValue("node-1")
+        val recovered = cluster.nodes.getValue("node-3")
+        leader.runtime.onElectionTimeout()
+        cluster.transport.unavailablePeers.add("node-3")
+        val commands: List<RaftCommand> = (1..3).map { value ->
+            RaftCommand.Put(byteArrayOf(value.toByte()), byteArrayOf((value * 10).toByte()))
+        }
+        commands.forEach { leader.runtime.appendCommand(it) }
+
+        assertEquals(3L, leader.volatileState.commitIndex)
+        assertEquals(0L, recovered.log.lastIndex())
+
+        cluster.transport.unavailablePeers.remove("node-3")
+        leader.runtime.onHeartbeatTimeout()
+
+        assertEquals(3L, recovered.log.lastIndex())
+        assertEquals(commands, (1L..3L).map { recovered.log.get(it)?.command })
+        assertEquals(3L, recovered.volatileState.commitIndex)
+        assertEquals(3L, recovered.volatileState.lastApplied)
+        assertEquals(commands, recovered.stateMachine.applied)
+    }
+
     @Test
     fun threeNodesElectLeaderReplicateCommitAndApplyCommand() = runTest {
         val cluster = cluster()
@@ -192,18 +276,31 @@ class RaftRuntimeIntegrationTest {
     private class RecordingTransport(
         private val delegate: RaftTransport,
     ): RaftTransport {
+        val unavailablePeers = mutableSetOf<String>()
+        val voteAttempts = mutableListOf<String>()
+        val appendAttempts = mutableListOf<String>()
         val appendRequests = mutableMapOf<String, MutableList<AppendEntriesRequest>>()
 
         override suspend fun requestVote(
             peerId: String,
             request: RequestVoteRequest,
-        ): RequestVoteResponse = delegate.requestVote(peerId, request)
+        ): RequestVoteResponse {
+            voteAttempts.add(peerId)
+            if (peerId in unavailablePeers) {
+                throw RaftPeerUnavailableException(peerId)
+            }
+            return delegate.requestVote(peerId, request)
+        }
 
         override suspend fun appendEntries(
             peerId: String,
             request: AppendEntriesRequest,
         ): AppendEntriesResponse {
+            appendAttempts.add(peerId)
             appendRequests.getOrPut(peerId) { mutableListOf() }.add(request)
+            if (peerId in unavailablePeers) {
+                throw RaftPeerUnavailableException(peerId)
+            }
             return delegate.appendEntries(peerId, request)
         }
     }

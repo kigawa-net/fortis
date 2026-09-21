@@ -25,5 +25,5 @@ class LocalRaftTransport : RaftTransport {
     ): AppendEntriesResponse = runtime(peerId).handleAppendEntries(request)
 
     private fun runtime(peerId: String): RaftRuntime =
-        requireNotNull(runtimes[peerId]) { "Unknown peer: $peerId" }
+        runtimes[peerId] ?: throw RaftPeerUnavailableException(peerId)
 }
