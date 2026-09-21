@@ -28,7 +28,7 @@ data class DiskCodecDecoder(
             when (data[5]) {
                 put -> DiskOperation.PUT
                 delete -> DiskOperation.DELETE
-                else -> error(
+                else -> throw IllegalArgumentException(
                     "Unknown disk operation: ${data[5]}"
                 )
             }

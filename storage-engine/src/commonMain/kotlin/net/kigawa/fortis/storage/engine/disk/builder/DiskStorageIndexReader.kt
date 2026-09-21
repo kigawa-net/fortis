@@ -1,6 +1,7 @@
 package net.kigawa.fortis.storage.engine.disk.builder
 
 import net.kigawa.fortis.io.fs.FsInput
+import net.kigawa.fortis.storage.engine.disk.DiskCorruptionException
 
 data class DiskStorageIndexReader(
     private val input: FsInput,
@@ -18,11 +19,11 @@ data class DiskStorageIndexReader(
                 bufferOffset = readTotal,
                 length = buffer.size - readTotal,
             )
-
-            check(read > 0) {
-                "Disk read made no progress"
+            if (read <= 0) {
+                throw DiskCorruptionException(
+                    "Unexpected EOF at offset ${offset + readTotal}"
+                )
             }
-
             readTotal += read
         }
     }

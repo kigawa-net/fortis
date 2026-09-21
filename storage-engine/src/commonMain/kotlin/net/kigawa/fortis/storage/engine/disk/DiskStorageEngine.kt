@@ -40,8 +40,10 @@ class DiskStorageEngine(
                     length = value.size - read,
                 )
 
-                check(count > 0) {
-                    "Disk read made no progress"
+                if (count <= 0) {
+                    throw DiskCorruptionException(
+                        "Unexpected EOF at offset ${entry.valueOffset + read}"
+                    )
                 }
 
                 read += count

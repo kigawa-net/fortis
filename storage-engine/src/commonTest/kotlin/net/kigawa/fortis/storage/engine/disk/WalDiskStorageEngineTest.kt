@@ -182,7 +182,7 @@ class WalDiskStorageEngineTest {
         assertEquals(2, wal.syncCount)
     }
 
-    private suspend fun build(wal: Wal) = WalDiskStorageEngineBuilder().wal(wal).build()
+    private suspend fun build(wal: Wal) = WalDiskStorageEngineBuilder(wal, null).build()
 
     private fun putRecord(sequence: Long, key: Int, value: Int) = WalRecord(
         sequence, WalOperation.PUT, byteArrayOf(key.toByte()), byteArrayOf(value.toByte()),

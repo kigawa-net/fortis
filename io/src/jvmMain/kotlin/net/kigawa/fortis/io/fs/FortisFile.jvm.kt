@@ -3,6 +3,7 @@ package net.kigawa.fortis.io.fs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.nio.channels.FileChannel
+import java.nio.file.NoSuchFileException
 import java.nio.file.StandardOpenOption
 
 actual suspend fun FortisFile.openRead(
