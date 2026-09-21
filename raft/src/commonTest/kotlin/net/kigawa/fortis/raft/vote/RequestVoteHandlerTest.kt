@@ -3,11 +3,14 @@ package net.kigawa.fortis.raft.vote
 import kotlinx.coroutines.test.runTest
 import net.kigawa.fortis.raft.RaftCommand
 import net.kigawa.fortis.raft.RaftPersistentState
+import net.kigawa.fortis.raft.MemoryRaftPersistentStateStore
+import net.kigawa.fortis.raft.RaftPersistentStateStore
 import net.kigawa.fortis.raft.log.MemoryRaftLog
 import net.kigawa.fortis.raft.log.RaftLogEntry
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -32,8 +35,9 @@ class RequestVoteHandlerTest {
         val log = MemoryRaftLog().also {
             it.append(entry(index = 1, term = 2))
         }
+        val store = MemoryRaftPersistentStateStore(state)
 
-        val response = handler(state, log).handleLock(
+        val response = RequestVoteHandler(state, store, log).handleLock(
             request(
                 term = 2,
                 candidateId = "new-candidate",
@@ -45,6 +49,23 @@ class RequestVoteHandlerTest {
         assertEquals(2L, state.currentTerm)
         assertEquals(2L, response.term)
         assertFalse(response.voteGranted)
+        assertNull(state.votedFor)
+        assertEquals(RaftPersistentState(2, null), store.load())
+    }
+
+    @Test
+    fun voteIsNotGrantedWhenPersistenceFails() = runTest {
+        val state = RaftPersistentState(currentTerm = 1)
+        val handler = RequestVoteHandler(
+            state,
+            FailingStateStore(state),
+            MemoryRaftLog(),
+        )
+
+        assertFailsWith<IllegalStateException> {
+            handler.handle(request(term = 1))
+        }
+
         assertNull(state.votedFor)
     }
 
@@ -168,7 +189,21 @@ class RequestVoteHandlerTest {
     private fun handler(
         state: RaftPersistentState,
         log: MemoryRaftLog = MemoryRaftLog(),
-    ) = RequestVoteHandler(state, log)
+    ) = RequestVoteHandler(
+        state,
+        MemoryRaftPersistentStateStore(state),
+        log,
+    )
+
+    private class FailingStateStore(
+        private val state: RaftPersistentState,
+    ) : RaftPersistentStateStore {
+        override suspend fun load(): RaftPersistentState = state.copy()
+
+        override suspend fun save(term: Long, votedFor: String?): Nothing {
+            error("save failed")
+        }
+    }
 
     private fun request(
         term: Long,

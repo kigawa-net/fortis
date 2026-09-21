@@ -3,11 +3,13 @@ package net.kigawa.fortis.raft.vote
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import net.kigawa.fortis.raft.RaftPersistentState
+import net.kigawa.fortis.raft.RaftPersistentStateStore
 import net.kigawa.fortis.raft.log.RaftLog
 
 
 class RequestVoteHandler(
     private val state: RaftPersistentState,
+    private val stateStore: RaftPersistentStateStore,
     private val log: RaftLog,
 ) {
     private val mutex = Mutex()
@@ -25,9 +27,11 @@ class RequestVoteHandler(
             )
         }
 
-        if (request.term > state.currentTerm) {
-            state.currentTerm = request.term
-            state.votedFor = null
+        val nextTerm = maxOf(state.currentTerm, request.term)
+        val previousVote = if (request.term > state.currentTerm) {
+            null
+        } else {
+            state.votedFor
         }
 
         val lastIndex = log.lastIndex()
@@ -42,15 +46,21 @@ class RequestVoteHandler(
                 localLastIndex = lastIndex,
             )
 
-        val canVote =
-            state.votedFor == null ||
-                state.votedFor == request.candidateId
+        val canVote = previousVote == null ||
+            previousVote == request.candidateId
 
         val voteGranted =
             canVote && logUpToDate
 
-        if (voteGranted) {
-            state.votedFor = request.candidateId
+        val nextVote = if (voteGranted) {
+            request.candidateId
+        } else {
+            previousVote
+        }
+        if (nextTerm != state.currentTerm || nextVote != state.votedFor) {
+            stateStore.save(nextTerm, nextVote)
+            state.currentTerm = nextTerm
+            state.votedFor = nextVote
         }
 
         return RequestVoteResponse(

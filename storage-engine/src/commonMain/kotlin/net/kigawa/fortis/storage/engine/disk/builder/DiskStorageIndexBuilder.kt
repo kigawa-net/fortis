@@ -7,13 +7,15 @@ import net.kigawa.fortis.storage.engine.disk.DiskIndexEntry
 import net.kigawa.fortis.storage.engine.disk.codec.DiskCodec
 import net.kigawa.fortis.storage.engine.disk.codec.DiskOperation
 
-data class DiskStorageIndexRebuilder(
+data class DiskStorageIndexBuilder(
     val input: FsInput,
-    val index: MutableMap<ByteArrayKey, DiskIndexEntry>,
     val diskCodec: DiskCodec,
 ) {
+    val indexReader = DiskStorageIndexReader(
+        input = input,
+    )
 
-    suspend fun rebuildIndex(): Long {
+    suspend fun buildIndex(index: MutableMap<ByteArrayKey, DiskIndexEntry>): Long {
         val fileSize = input.size()
         var offset = 0L
 
@@ -24,14 +26,9 @@ data class DiskStorageIndexRebuilder(
                 )
             }
 
-            val headerBytes =
-                ByteArray(diskCodec.headerSize)
+            val headerBytes = ByteArray(diskCodec.headerSize)
 
-            DiskStorageIndexReader(
-                input = input,
-                offset = offset,
-                buffer = headerBytes,
-            ).readFully()
+            indexReader.readFully(offset, headerBytes)
 
             val header =
                 try {
@@ -59,11 +56,7 @@ data class DiskStorageIndexRebuilder(
 
             val key = ByteArray(header.keyLength)
 
-            DiskStorageIndexReader(
-                input = input,
-                offset = offset + diskCodec.headerSize,
-                buffer = key,
-            ).readFully()
+            indexReader.readFully(offset + diskCodec.headerSize, key)
 
             when (header.operation) {
                 DiskOperation.PUT -> {

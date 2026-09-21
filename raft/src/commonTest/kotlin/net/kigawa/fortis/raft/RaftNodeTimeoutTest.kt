@@ -50,7 +50,7 @@ class RaftNodeTimeoutTest {
     }
 
     @Test
-    fun followerDoesNotExposeHeartbeatApi() {
+    fun followerDoesNotExposeHeartbeatApi() = runTest {
         assertIs<FollowerNode>(fixture().follower)
     }
 
@@ -108,12 +108,14 @@ class RaftNodeTimeoutTest {
         return fixture
     }
 
-    private fun fixture(currentTerm: Long = 0): Fixture {
+    private suspend fun fixture(currentTerm: Long = 0): Fixture {
         val timer = RecordingTimer()
         val follower = RaftNodeBuilder(
             nodeId = "self",
             peerIds = setOf("peer-1", "peer-2"),
-            persistentState = RaftPersistentState(currentTerm = currentTerm),
+            persistentStateStore = MemoryRaftPersistentStateStore(
+                RaftPersistentState(currentTerm = currentTerm),
+            ),
             volatileState = RaftVolatileState(),
             log = MemoryRaftLog(),
             stateMachine = NoOpStateMachine(),

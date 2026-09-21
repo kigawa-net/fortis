@@ -15,7 +15,7 @@ import kotlin.test.assertIs
 
 class RaftNodeCommandTest {
     @Test
-    fun builderCreatesFollowerWithoutCommandApi() {
+    fun builderCreatesFollowerWithoutCommandApi() = runTest {
         assertIs<FollowerNode>(fixture().follower)
     }
 
@@ -93,7 +93,7 @@ class RaftNodeCommandTest {
         return fixture
     }
 
-    private fun fixture(
+    private suspend fun fixture(
         peerIds: List<String> = listOf("peer-1", "peer-2"),
     ): Fixture {
         val volatileState = RaftVolatileState()
@@ -102,7 +102,7 @@ class RaftNodeCommandTest {
         val follower = RaftNodeBuilder(
             nodeId = "self",
             peerIds = peerIds.toSet(),
-            persistentState = RaftPersistentState(),
+            persistentStateStore = MemoryRaftPersistentStateStore(),
             volatileState = volatileState,
             log = log,
             stateMachine = stateMachine,

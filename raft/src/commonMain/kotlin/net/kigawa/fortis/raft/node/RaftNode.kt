@@ -5,6 +5,7 @@ import kotlinx.coroutines.sync.withLock
 import net.kigawa.fortis.raft.RaftApplier
 import net.kigawa.fortis.raft.RaftCommitAdvancer
 import net.kigawa.fortis.raft.RaftPersistentState
+import net.kigawa.fortis.raft.RaftPersistentStateStore
 import net.kigawa.fortis.raft.RaftStateMachine
 import net.kigawa.fortis.raft.append.AppendEntriesHandler
 import net.kigawa.fortis.raft.append.AppendEntriesRequest
@@ -20,6 +21,7 @@ abstract class RaftNode(
     val nodeId: String,
     val peerIds: Set<String>,
     val persistentState: RaftPersistentState,
+    val persistentStateStore: RaftPersistentStateStore,
     val volatileState: RaftVolatileState,
     val log: RaftLog,
     val stateMachine: RaftStateMachine,
@@ -27,9 +29,14 @@ abstract class RaftNode(
 ) {
     private val mutex = Mutex()
     private val applier = RaftApplier(volatileState, log, stateMachine)
-    private val requestVoteHandler = RequestVoteHandler(persistentState, log)
+    private val requestVoteHandler = RequestVoteHandler(
+        persistentState,
+        persistentStateStore,
+        log,
+    )
     private val appendEntriesHandler = AppendEntriesHandler(
         persistentState,
+        persistentStateStore,
         volatileState,
         log,
         applier,
@@ -82,6 +89,7 @@ abstract class RaftNode(
         nodeId,
         peerIds,
         persistentState,
+        persistentStateStore,
         volatileState,
         log,
         stateMachine,

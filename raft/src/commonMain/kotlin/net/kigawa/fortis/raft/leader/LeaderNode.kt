@@ -5,6 +5,7 @@ import kotlinx.coroutines.sync.withLock
 import net.kigawa.fortis.raft.RaftCommand
 import net.kigawa.fortis.raft.RaftPeerProgress
 import net.kigawa.fortis.raft.RaftPersistentState
+import net.kigawa.fortis.raft.RaftPersistentStateStore
 import net.kigawa.fortis.raft.RaftStateMachine
 import net.kigawa.fortis.raft.append.AppendEntriesFactory
 import net.kigawa.fortis.raft.append.AppendEntriesRequest
@@ -22,6 +23,7 @@ class LeaderNode(
     nodeId: String,
     peerIds: Set<String>,
     persistentState: RaftPersistentState,
+    persistentStateStore: RaftPersistentStateStore,
     volatileState: RaftVolatileState,
     log: RaftLog,
     stateMachine: RaftStateMachine,
@@ -31,6 +33,7 @@ class LeaderNode(
     nodeId,
     peerIds,
     persistentState,
+    persistentStateStore,
     volatileState,
     log,
     stateMachine,
@@ -45,6 +48,7 @@ class LeaderNode(
     )
     private val appendEntriesResponseHandler = AppendEntriesResponseHandler(
         persistentState,
+        persistentStateStore,
         commitAdvancer,
         raftApplier,
     )

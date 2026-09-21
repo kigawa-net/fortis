@@ -4,12 +4,14 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import net.kigawa.fortis.raft.RaftApplier
 import net.kigawa.fortis.raft.RaftPersistentState
+import net.kigawa.fortis.raft.RaftPersistentStateStore
 import net.kigawa.fortis.raft.log.RaftLog
 import net.kigawa.fortis.raft.log.RaftLogEntry
 import net.kigawa.fortis.raft.vote.RaftVolatileState
 
 class AppendEntriesHandler(
     private val persistentState: RaftPersistentState,
+    private val persistentStateStore: RaftPersistentStateStore,
     private val volatileState: RaftVolatileState,
     private val log: RaftLog,
     private val applier: RaftApplier,
@@ -28,6 +30,7 @@ class AppendEntriesHandler(
         }
 
         if (request.term > persistentState.currentTerm) {
+            persistentStateStore.save(request.term, null)
             persistentState.currentTerm = request.term
             persistentState.votedFor = null
         }

@@ -2,6 +2,7 @@ package net.kigawa.fortis.raft.candidate
 
 import net.kigawa.fortis.raft.RaftPeerProgress
 import net.kigawa.fortis.raft.RaftPersistentState
+import net.kigawa.fortis.raft.RaftPersistentStateStore
 import net.kigawa.fortis.raft.RaftStateMachine
 import net.kigawa.fortis.raft.leader.LeaderNode
 import net.kigawa.fortis.raft.log.RaftLog
@@ -17,6 +18,7 @@ class CandidateNode(
     nodeId: String,
     peerIds: Set<String>,
     persistentState: RaftPersistentState,
+    persistentStateStore: RaftPersistentStateStore,
     volatileState: RaftVolatileState,
     log: RaftLog,
     stateMachine: RaftStateMachine,
@@ -26,6 +28,7 @@ class CandidateNode(
     nodeId,
     peerIds,
     persistentState,
+    persistentStateStore,
     volatileState,
     log,
     stateMachine,
@@ -45,7 +48,9 @@ class CandidateNode(
         check(persistentState.currentTerm < Long.MAX_VALUE) {
             "Raft term is exhausted"
         }
-        persistentState.currentTerm++
+        val nextTerm = persistentState.currentTerm + 1
+        persistentStateStore.save(nextTerm, nodeId)
+        persistentState.currentTerm = nextTerm
         persistentState.votedFor = nodeId
         votesGranted.clear()
         votesGranted.add(nodeId)
@@ -60,6 +65,7 @@ class CandidateNode(
         require(peerId in peerIds) { "Unknown peer: $peerId" }
 
         if (response.term > persistentState.currentTerm) {
+            persistentStateStore.save(response.term, null)
             persistentState.currentTerm = response.term
             persistentState.votedFor = null
             votesGranted.clear()
@@ -91,6 +97,7 @@ class CandidateNode(
             nodeId,
             peerIds,
             persistentState,
+            persistentStateStore,
             volatileState,
             log,
             stateMachine,

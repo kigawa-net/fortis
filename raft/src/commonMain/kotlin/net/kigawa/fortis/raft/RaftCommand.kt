@@ -1,6 +1,9 @@
 package net.kigawa.fortis.raft
 
+import net.kigawa.fortis.storage.engine.FortisStorageEngine
+
 sealed interface RaftCommand {
+    suspend fun execute(storageEngine: FortisStorageEngine)
     data class Put(
         val key: ByteArray,
         val value: ByteArray,
@@ -22,6 +25,10 @@ sealed interface RaftCommand {
             result = 31 * result + value.contentHashCode()
             return result
         }
+
+        override suspend fun execute(storageEngine: FortisStorageEngine) {
+            storageEngine.put(key, value)
+        }
     }
 
     data class Delete(
@@ -38,6 +45,10 @@ sealed interface RaftCommand {
 
         override fun hashCode(): Int {
             return key.contentHashCode()
+        }
+
+        override suspend fun execute(storageEngine: FortisStorageEngine) {
+            storageEngine.delete(key)
         }
     }
 }

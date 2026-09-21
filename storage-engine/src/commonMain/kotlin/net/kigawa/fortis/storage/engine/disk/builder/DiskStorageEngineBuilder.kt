@@ -25,11 +25,10 @@ data class DiskStorageEngineBuilder(
 
         try {
             file.openRead { input ->
-                endOffset = DiskStorageIndexRebuilder(
+                endOffset = DiskStorageIndexBuilder(
                     input = input,
-                    index = index,
                     diskCodec = diskCodec,
-                ).rebuildIndex()
+                ).buildIndex(index)
             }
         } catch (_: FsFileNotFoundException) {
             // 新規DBなので空状態で開始

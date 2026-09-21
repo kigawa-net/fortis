@@ -4,9 +4,11 @@ import net.kigawa.fortis.raft.RaftApplier
 import net.kigawa.fortis.raft.RaftCommitAdvancer
 import net.kigawa.fortis.raft.RaftPeerProgress
 import net.kigawa.fortis.raft.RaftPersistentState
+import net.kigawa.fortis.raft.RaftPersistentStateStore
 
 class AppendEntriesResponseHandler(
     private val persistentState: RaftPersistentState,
+    private val persistentStateStore: RaftPersistentStateStore,
     private val commitAdvancer: RaftCommitAdvancer,
     private val applier: RaftApplier,
 ) {
@@ -21,6 +23,7 @@ class AppendEntriesResponseHandler(
         }
 
         if (response.term > persistentState.currentTerm) {
+            persistentStateStore.save(response.term, null)
             persistentState.currentTerm = response.term
             persistentState.votedFor = null
             return peers

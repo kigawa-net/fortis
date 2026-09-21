@@ -1,6 +1,7 @@
 package net.kigawa.fortis.raft.follower
 
 import net.kigawa.fortis.raft.RaftPersistentState
+import net.kigawa.fortis.raft.RaftPersistentStateStore
 import net.kigawa.fortis.raft.RaftStateMachine
 import net.kigawa.fortis.raft.candidate.CandidateNode
 import net.kigawa.fortis.raft.leader.LeaderNode
@@ -16,6 +17,7 @@ class FollowerNode(
     nodeId: String,
     peerIds: Set<String>,
     persistentState: RaftPersistentState,
+    persistentStateStore: RaftPersistentStateStore,
     volatileState: RaftVolatileState,
     log: RaftLog,
     stateMachine: RaftStateMachine,
@@ -24,6 +26,7 @@ class FollowerNode(
     nodeId,
     peerIds,
     persistentState,
+    persistentStateStore,
     volatileState,
     log,
     stateMachine,
@@ -33,13 +36,16 @@ class FollowerNode(
         check(persistentState.currentTerm < Long.MAX_VALUE) {
             "Raft term is exhausted"
         }
-        persistentState.currentTerm++
+        val nextTerm = persistentState.currentTerm + 1
+        persistentStateStore.save(nextTerm, nodeId)
+        persistentState.currentTerm = nextTerm
         persistentState.votedFor = nodeId
 
         val candidate = CandidateNode(
             nodeId,
             peerIds,
             persistentState,
+            persistentStateStore,
             volatileState,
             log,
             stateMachine,

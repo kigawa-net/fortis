@@ -4,6 +4,7 @@ import kotlinx.coroutines.test.runTest
 import net.kigawa.fortis.raft.RaftApplier
 import net.kigawa.fortis.raft.RaftCommand
 import net.kigawa.fortis.raft.RaftPersistentState
+import net.kigawa.fortis.raft.MemoryRaftPersistentStateStore
 import net.kigawa.fortis.raft.RaftStateMachine
 import net.kigawa.fortis.raft.log.MemoryRaftLog
 import net.kigawa.fortis.raft.log.RaftLogEntry
@@ -40,6 +41,10 @@ class AppendEntriesHandlerTest {
         assertEquals(2L, response.term)
         assertEquals(2L, fixture.persistentState.currentTerm)
         assertNull(fixture.persistentState.votedFor)
+        assertEquals(
+            RaftPersistentState(2, null),
+            fixture.persistentStateStore.load(),
+        )
     }
 
     @Test
@@ -225,13 +230,18 @@ class AppendEntriesHandlerTest {
         val volatileState = RaftVolatileState()
         val log = MemoryRaftLog()
         val stateMachine = RecordingStateMachine()
+        val persistentStateStore = MemoryRaftPersistentStateStore(
+            persistentState,
+        )
         return Fixture(
             persistentState = persistentState,
+            persistentStateStore = persistentStateStore,
             volatileState = volatileState,
             log = log,
             stateMachine = stateMachine,
             handler = AppendEntriesHandler(
                 persistentState = persistentState,
+                persistentStateStore = persistentStateStore,
                 volatileState = volatileState,
                 log = log,
                 applier = RaftApplier(
@@ -275,6 +285,7 @@ class AppendEntriesHandlerTest {
 
     private data class Fixture(
         val persistentState: RaftPersistentState,
+        val persistentStateStore: MemoryRaftPersistentStateStore,
         val volatileState: RaftVolatileState,
         val log: MemoryRaftLog,
         val stateMachine: RecordingStateMachine,

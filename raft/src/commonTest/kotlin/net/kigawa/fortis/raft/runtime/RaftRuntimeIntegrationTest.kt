@@ -1,8 +1,8 @@
 package net.kigawa.fortis.raft.runtime
 
 import kotlinx.coroutines.test.runTest
+import net.kigawa.fortis.raft.MemoryRaftPersistentStateStore
 import net.kigawa.fortis.raft.RaftCommand
-import net.kigawa.fortis.raft.RaftPersistentState
 import net.kigawa.fortis.raft.RaftStateMachine
 import net.kigawa.fortis.raft.append.AppendEntriesRequest
 import net.kigawa.fortis.raft.append.AppendEntriesResponse
@@ -112,11 +112,12 @@ class RaftRuntimeIntegrationTest {
         assertLogTerms(cluster.nodes.getValue("node-2").log, 1, 2, 2)
     }
 
-    private fun cluster(): Cluster {
+    private suspend fun cluster(): Cluster {
         val localTransport = LocalRaftTransport()
         val recordingTransport = RecordingTransport(localTransport)
-        val nodes = listOf("node-1", "node-2", "node-3").associateWith { nodeId ->
-            nodeFixture(nodeId, recordingTransport)
+        val nodes = mutableMapOf<String, NodeFixture>()
+        for (nodeId in listOf("node-1", "node-2", "node-3")) {
+            nodes[nodeId] = nodeFixture(nodeId, recordingTransport)
         }
         for ((nodeId, fixture) in nodes) {
             localTransport.register(nodeId, fixture.runtime)
@@ -124,19 +125,18 @@ class RaftRuntimeIntegrationTest {
         return Cluster(nodes, recordingTransport)
     }
 
-    private fun nodeFixture(
+    private suspend fun nodeFixture(
         nodeId: String,
         transport: RaftTransport,
     ): NodeFixture {
         val peerIds = setOf("node-1", "node-2", "node-3") - nodeId
-        val persistentState = RaftPersistentState()
         val volatileState = RaftVolatileState()
         val log = MemoryRaftLog()
         val stateMachine = RecordingStateMachine()
         val follower = RaftNodeBuilder(
             nodeId = nodeId,
             peerIds = peerIds,
-            persistentState = persistentState,
+            persistentStateStore = MemoryRaftPersistentStateStore(),
             volatileState = volatileState,
             log = log,
             stateMachine = stateMachine,
@@ -181,7 +181,7 @@ class RaftRuntimeIntegrationTest {
         val stateMachine: RecordingStateMachine,
     )
 
-    private class RecordingStateMachine : RaftStateMachine {
+    private class RecordingStateMachine: RaftStateMachine {
         val applied = mutableListOf<RaftCommand>()
 
         override suspend fun apply(command: RaftCommand) {
@@ -191,7 +191,7 @@ class RaftRuntimeIntegrationTest {
 
     private class RecordingTransport(
         private val delegate: RaftTransport,
-    ) : RaftTransport {
+    ): RaftTransport {
         val appendRequests = mutableMapOf<String, MutableList<AppendEntriesRequest>>()
 
         override suspend fun requestVote(

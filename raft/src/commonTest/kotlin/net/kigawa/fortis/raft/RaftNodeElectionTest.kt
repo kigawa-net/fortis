@@ -14,6 +14,7 @@ import net.kigawa.fortis.raft.vote.RequestVoteRequest
 import net.kigawa.fortis.raft.vote.RequestVoteResponse
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 
@@ -29,6 +30,10 @@ class RaftNodeElectionTest {
         assertIs<CandidateNode>(fixture.node)
         assertEquals(5L, request.term)
         assertEquals("self", request.candidateId)
+        assertEquals(
+            RaftPersistentState(5, "self"),
+            fixture.persistentStateStore.load(),
+        )
     }
 
     @Test
@@ -89,6 +94,62 @@ class RaftNodeElectionTest {
         assertEquals(3L, fixture.persistentState.currentTerm)
         assertNull(fixture.persistentState.votedFor)
         assertIs<FollowerNode>(fixture.node)
+        assertEquals(
+            RaftPersistentState(3, null),
+            fixture.persistentStateStore.load(),
+        )
+    }
+
+    @Test
+    fun candidateElectionTimeoutPersistsNewTermAndSelfVote() = runTest {
+        val fixture = fixture(currentTerm = 1)
+        fixture.startElection()
+        val candidate = assertIs<CandidateNode>(fixture.node)
+
+        val result = candidate.onElectionTimeout()
+
+        assertEquals(3L, result.value.term)
+        assertEquals(
+            RaftPersistentState(3, "self"),
+            fixture.persistentStateStore.load(),
+        )
+    }
+
+    @Test
+    fun persistenceFailurePreventsElectionStateChange() = runTest {
+        val store = FailingStateStore(RaftPersistentState(4, null))
+        val follower = RaftNodeBuilder(
+            nodeId = "self",
+            peerIds = setOf("peer-1"),
+            persistentStateStore = store,
+            volatileState = RaftVolatileState(),
+            log = MemoryRaftLog(),
+            stateMachine = NoOpStateMachine(),
+        ).build()
+
+        assertFailsWith<IllegalStateException> {
+            follower.onElectionTimeout()
+        }
+
+        assertEquals(RaftPersistentState(4, null), follower.persistentState)
+    }
+
+    @Test
+    fun builderRestoresTermAndVoteFromStore() = runTest {
+        val fixture = fixture(currentTerm = 4)
+        fixture.startElection()
+
+        val rebuilt = RaftNodeBuilder(
+            nodeId = "self",
+            peerIds = setOf("peer-1", "peer-2"),
+            persistentStateStore = fixture.persistentStateStore,
+            volatileState = RaftVolatileState(),
+            log = fixture.log,
+            stateMachine = NoOpStateMachine(),
+        ).build()
+
+        assertEquals(5L, rebuilt.persistentState.currentTerm)
+        assertEquals("self", rebuilt.persistentState.votedFor)
     }
 
     @Test
@@ -127,21 +188,23 @@ class RaftNodeElectionTest {
         }
     }
 
-    private fun fixture(
+    private suspend fun fixture(
         currentTerm: Long,
         peerIds: List<String> = listOf("peer-1", "peer-2"),
     ): Fixture {
-        val persistentState = RaftPersistentState(currentTerm = currentTerm)
+        val persistentStateStore = MemoryRaftPersistentStateStore(
+            RaftPersistentState(currentTerm = currentTerm),
+        )
         val log = MemoryRaftLog()
         val node = RaftNodeBuilder(
             nodeId = "self",
             peerIds = peerIds.toSet(),
-            persistentState = persistentState,
+            persistentStateStore = persistentStateStore,
             volatileState = RaftVolatileState(),
             log = log,
             stateMachine = NoOpStateMachine(),
         ).build()
-        return Fixture(persistentState, log, node)
+        return Fixture(node.persistentState, persistentStateStore, log, node)
     }
 
     private fun vote(term: Long, granted: Boolean = true) =
@@ -155,6 +218,7 @@ class RaftNodeElectionTest {
 
     private data class Fixture(
         val persistentState: RaftPersistentState,
+        val persistentStateStore: RaftPersistentStateStore,
         val log: MemoryRaftLog,
         var node: RaftNode,
     ) {
@@ -172,5 +236,15 @@ class RaftNodeElectionTest {
 
     private class NoOpStateMachine : RaftStateMachine {
         override suspend fun apply(command: RaftCommand) = Unit
+    }
+
+    private class FailingStateStore(
+        private val state: RaftPersistentState,
+    ) : RaftPersistentStateStore {
+        override suspend fun load(): RaftPersistentState = state.copy()
+
+        override suspend fun save(term: Long, votedFor: String?): Nothing {
+            error("save failed")
+        }
     }
 }

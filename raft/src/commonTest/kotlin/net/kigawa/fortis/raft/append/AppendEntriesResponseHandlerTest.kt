@@ -6,6 +6,7 @@ import net.kigawa.fortis.raft.RaftCommand
 import net.kigawa.fortis.raft.RaftCommitAdvancer
 import net.kigawa.fortis.raft.RaftPeerProgress
 import net.kigawa.fortis.raft.RaftPersistentState
+import net.kigawa.fortis.raft.MemoryRaftPersistentStateStore
 import net.kigawa.fortis.raft.RaftStateMachine
 import net.kigawa.fortis.raft.log.MemoryRaftLog
 import net.kigawa.fortis.raft.log.RaftLogEntry
@@ -89,6 +90,10 @@ class AppendEntriesResponseHandlerTest {
 
         assertEquals(3L, fixture.persistentState.currentTerm)
         assertNull(fixture.persistentState.votedFor)
+        assertEquals(
+            RaftPersistentState(3, null),
+            fixture.persistentStateStore.load(),
+        )
         assertEquals(3L, progress.nextIndex)
         assertEquals(2L, progress.matchIndex)
     }
@@ -100,11 +105,16 @@ class AppendEntriesResponseHandlerTest {
         val persistentState = RaftPersistentState(currentTerm, votedFor)
         val volatileState = RaftVolatileState()
         val log = MemoryRaftLog()
+        val persistentStateStore = MemoryRaftPersistentStateStore(
+            persistentState,
+        )
         return Fixture(
             persistentState = persistentState,
+            persistentStateStore = persistentStateStore,
             log = log,
             handler = AppendEntriesResponseHandler(
                 persistentState = persistentState,
+                persistentStateStore = persistentStateStore,
                 commitAdvancer = RaftCommitAdvancer(
                     persistentState = persistentState,
                     volatileState = volatileState,
@@ -140,6 +150,7 @@ class AppendEntriesResponseHandlerTest {
 
     private data class Fixture(
         val persistentState: RaftPersistentState,
+        val persistentStateStore: MemoryRaftPersistentStateStore,
         val log: MemoryRaftLog,
         val handler: AppendEntriesResponseHandler,
     )
