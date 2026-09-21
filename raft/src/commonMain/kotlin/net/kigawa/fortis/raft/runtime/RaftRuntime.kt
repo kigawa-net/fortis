@@ -10,6 +10,7 @@ import net.kigawa.fortis.raft.follower.FollowerNode
 import net.kigawa.fortis.raft.leader.LeaderNode
 import net.kigawa.fortis.raft.log.RaftLogEntry
 import net.kigawa.fortis.raft.node.RaftNode
+import net.kigawa.fortis.raft.node.RaftTimeoutEvent
 import net.kigawa.fortis.raft.transport.RaftTransport
 import net.kigawa.fortis.raft.vote.RequestVoteRequest
 import net.kigawa.fortis.raft.vote.RequestVoteResponse
@@ -23,6 +24,14 @@ class RaftRuntime(
 
     val currentNode: RaftNode
         get() = node
+
+    suspend fun start() {
+        node.timer.reset(RaftTimeoutEvent.Election)
+    }
+
+    suspend fun stop() {
+        node.timer.cancel()
+    }
 
     suspend fun handleRequestVote(
         request: RequestVoteRequest,
@@ -57,8 +66,7 @@ class RaftRuntime(
     }
 
     suspend fun onHeartbeatTimeout(): Unit = mutex.withLock {
-        val leader = node as? LeaderNode
-            ?: error("Only leader handles heartbeat timeout")
+        val leader = node as? LeaderNode ?: return@withLock
         val requests = leader.onHeartbeatTimeout()
         for ((peerId, request) in requests) {
             replicatePeer(peerId, request)

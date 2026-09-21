@@ -24,6 +24,7 @@ data class DiskCodecDecoder(
             "Unsupported disk record version: ${data[4]}"
         }
 
+        val reader = DiskCodecReader(data)
         val operation =
             when (data[5]) {
                 put -> DiskOperation.Put
@@ -33,8 +34,8 @@ data class DiskCodecDecoder(
                 )
             }
 
-        val keyLength = readInt(data, 6)
-        val valueLength = readInt(data, 10)
+        val keyLength = reader.readInt(6)
+        val valueLength = reader.readInt(10)
 
         require(keyLength >= 0)
 
@@ -46,13 +47,4 @@ data class DiskCodecDecoder(
             valueLength = valueLength,
         )
     }
-
-    private fun readInt(
-        data: ByteArray,
-        offset: Int,
-    ): Int =
-        ((data[offset].toInt() and 0xff) shl 24) or
-            ((data[offset + 1].toInt() and 0xff) shl 16) or
-            ((data[offset + 2].toInt() and 0xff) shl 8) or
-            (data[offset + 3].toInt() and 0xff)
 }

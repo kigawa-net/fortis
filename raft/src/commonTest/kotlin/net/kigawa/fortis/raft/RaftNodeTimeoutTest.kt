@@ -2,6 +2,7 @@ package net.kigawa.fortis.raft
 
 import kotlinx.coroutines.test.runTest
 import net.kigawa.fortis.raft.append.AppendEntriesRequest
+import net.kigawa.fortis.raft.append.AppendEntriesResponse
 import net.kigawa.fortis.raft.candidate.CandidateNode
 import net.kigawa.fortis.raft.follower.FollowerNode
 import net.kigawa.fortis.raft.leader.LeaderNode
@@ -89,6 +90,25 @@ class RaftNodeTimeoutTest {
         )
 
         assertTrue(result.value.voteGranted)
+        assertEquals(
+            listOf<RaftTimeoutEvent>(RaftTimeoutEvent.Election),
+            fixture.timer.events,
+        )
+    }
+
+    @Test
+    fun higherTermReplicationResponseSwitchesToElectionTimer() = runTest {
+        val fixture = electedLeader()
+        fixture.timer.events.clear()
+        val request = fixture.leader.createAppendEntries("peer-1")
+
+        val nextNode = fixture.leader.handleAppendEntriesResponse(
+            peerId = "peer-1",
+            request = request,
+            response = AppendEntriesResponse(term = 2, success = false),
+        )
+
+        assertIs<FollowerNode>(nextNode)
         assertEquals(
             listOf<RaftTimeoutEvent>(RaftTimeoutEvent.Election),
             fixture.timer.events,

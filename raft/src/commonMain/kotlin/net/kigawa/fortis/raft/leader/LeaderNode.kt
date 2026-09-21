@@ -84,7 +84,12 @@ class LeaderNode(
             response,
             peerProgress,
         )
-        if (response.term > previousTerm) follower() else this
+        if (response.term > previousTerm) {
+            timer.reset(RaftTimeoutEvent.Election)
+            follower()
+        } else {
+            this
+        }
     }
 
     suspend fun onHeartbeatTimeout(): Map<String, AppendEntriesRequest> =
