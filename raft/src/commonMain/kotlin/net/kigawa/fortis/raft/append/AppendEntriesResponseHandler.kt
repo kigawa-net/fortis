@@ -16,9 +16,9 @@ class AppendEntriesResponseHandler(
         role: RaftRole,
         peers: Map<String, RaftPeerProgress>,
         setRole: (RaftRole) -> Unit,
-    ) {
+    ): Map<String, RaftPeerProgress> {
         if (role != RaftRole.LEADER) {
-            return
+            return peers
         }
         val progress =
             requireNotNull(peers[peerId]) {
@@ -41,6 +41,7 @@ class AppendEntriesResponseHandler(
         ) {
             setRole(RaftRole.FOLLOWER)
         }
+        return peers
     }
 
     private suspend fun handleInternal(
@@ -63,16 +64,12 @@ class AppendEntriesResponseHandler(
             request.entries.lastOrNull()?.index
                 ?: request.prevLogIndex
 
-        progress.matchIndex =
-            maxOf(
-                progress.matchIndex,
-                lastSentIndex,
-            )
+        var progress = progress.copy(matchIndex = maxOf(progress.matchIndex, lastSentIndex))
 
-        val result = progress.copy(nextIndex = progress.matchIndex + 1)
+        progress = progress.copy(nextIndex = progress.matchIndex + 1)
 
         commitAdvancer.advance(peers)
         applier.applyCommitted()
-        return result
+        return progress
     }
 }

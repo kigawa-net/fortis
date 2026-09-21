@@ -11,7 +11,7 @@ import net.kigawa.fortis.raft.vote.RequestVoteHandler
 import net.kigawa.fortis.raft.vote.RequestVoteRequest
 import net.kigawa.fortis.raft.vote.RequestVoteResponse
 
-class RaftNode(
+abstract class RaftNode(
     var peers: Map<String, RaftPeerProgress>,
     val requestVoteHandler: RequestVoteHandler,
     val appendEntriesHandler: AppendEntriesHandler,
@@ -22,7 +22,7 @@ class RaftNode(
     val requestVoteResponseHandler: RequestVoteResponseHandler,
     val timer: RaftTimer,
 ) {
-    private val mutex = Mutex()
+    internal val mutex = Mutex()
     private val votesGranted = mutableSetOf<String>()
     var role: RaftRole = RaftRole.FOLLOWER
         private set
@@ -47,9 +47,6 @@ class RaftNode(
         }
     }
 
-    suspend fun createAppendEntries(peerId: String): AppendEntriesRequest = mutex.withLock {
-        appendEntriesFactory.create(peerId, role, peers)
-    }
 
     suspend fun appendCommand(command: RaftCommand): RaftLogEntry = mutex.withLock {
         commandAppender.append(command, role, peers.values)
@@ -58,7 +55,7 @@ class RaftNode(
     suspend fun handleAppendEntriesResponse(
         peerId: String, request: AppendEntriesRequest, response: AppendEntriesResponse,
     ): Unit = mutex.withLock {
-        appendEntriesResponseHandler.handle(peerId, request, response, role, peers, ::setRole)
+        peers = appendEntriesResponseHandler.handle(peerId, request, response, role, peers, ::setRole)
     }
 
     suspend fun startElection(): RequestVoteRequest = mutex.withLock {
@@ -67,7 +64,7 @@ class RaftNode(
 
     suspend fun handleRequestVoteResponse(peerId: String, response: RequestVoteResponse): Unit = mutex.withLock {
         val previousRole = role
-        requestVoteResponseHandler.handle(peerId, response, peers, role, votesGranted, ::setRole)
+        peers = requestVoteResponseHandler.handle(peerId, response, peers, role, votesGranted, ::setRole)
         if (previousRole != RaftRole.LEADER && role == RaftRole.LEADER) {
             timer.reset(RaftTimeoutEvent.Heartbeat)
         }
@@ -77,17 +74,7 @@ class RaftNode(
         startElectionLocked()
     }
 
-    suspend fun onHeartbeatTimeout(): Map<String, AppendEntriesRequest> = mutex.withLock {
-        check(role == RaftRole.LEADER) {
-            "Only leader handles heartbeat timeout"
-        }
-        val requests = mutableMapOf<String, AppendEntriesRequest>()
-        for (peerId in peers.keys) {
-            requests[peerId] = appendEntriesFactory.create(peerId, role, peers)
-        }
-        timer.reset(RaftTimeoutEvent.Heartbeat)
-        requests
-    }
+
 
     private suspend fun startElectionLocked(): RequestVoteRequest {
         val request = electionStarter.startElection(

@@ -2,7 +2,6 @@ package net.kigawa.fortis.raft.append
 
 import net.kigawa.fortis.raft.RaftPeerProgress
 import net.kigawa.fortis.raft.RaftPersistentState
-import net.kigawa.fortis.raft.RaftRole
 import net.kigawa.fortis.raft.log.RaftLog
 import net.kigawa.fortis.raft.log.RaftLogEntry
 import net.kigawa.fortis.raft.vote.RaftVolatileState
@@ -14,12 +13,8 @@ class AppendEntriesFactory(
     private val log: RaftLog,
 ) {
     suspend fun create(
-        peerId: String, role: RaftRole, peers: Map<String, RaftPeerProgress>,
+        peerId: String, peers: Map<String, RaftPeerProgress>,
     ): AppendEntriesRequest {
-        check(role == RaftRole.LEADER) {
-            "Only leader can create AppendEntries"
-        }
-
         val progress =
             requireNotNull(peers[peerId]) {
                 "Unknown peer: $peerId"

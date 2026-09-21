@@ -16,7 +16,7 @@ class RequestVoteResponseHandler(
         role: RaftRole,
         votesGranted: MutableSet<String>,
         setRole: (RaftRole) -> Unit,
-    ) {
+    ): Map<String, RaftPeerProgress> {
         require(peers.containsKey(peerId)) {
             "Unknown peer: $peerId"
         }
@@ -26,7 +26,7 @@ class RequestVoteResponseHandler(
             persistentState.votedFor = null
             votesGranted.clear()
             setRole(RaftRole.FOLLOWER)
-            return
+            return peers
         }
 
         if (
@@ -34,12 +34,15 @@ class RequestVoteResponseHandler(
             response.term != persistentState.currentTerm ||
             !response.voteGranted
         ) {
-            return
+            return peers
         }
 
         votesGranted.add(peerId)
         if (electionStarter.hasMajority(peers, votesGranted)) {
-            electionStarter.becomeLeader(peers, setRole)
+            val (updatedPeers, updatedRole) = electionStarter.becomeLeader(peers)
+            setRole(updatedRole)
+            return updatedPeers
         }
+        return peers
     }
 }

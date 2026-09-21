@@ -4,6 +4,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import net.kigawa.fortis.raft.RaftCommand
 import net.kigawa.fortis.raft.RaftRole
+import net.kigawa.fortis.raft.append.AppendEntriesRequest
+import net.kigawa.fortis.raft.leader.LeaderNode
 import net.kigawa.fortis.raft.log.RaftLogEntry
 import net.kigawa.fortis.raft.node.RaftNode
 import net.kigawa.fortis.raft.transport.RaftTransport
@@ -24,10 +26,12 @@ class RaftRuntime(
     }
 
     suspend fun onHeartbeatTimeout(): Unit = mutex.withLock {
+        if (node !is LeaderNode) {
+            throw IllegalStateException("Only leader handles heartbeat timeout")
+        }
         val requests = node.onHeartbeatTimeout()
         for ((peerId, request) in requests) {
-            val response = transport.appendEntries(peerId, request)
-            node.handleAppendEntriesResponse(peerId, request, response)
+            replicatePeer(peerId, request)
         }
     }
 
@@ -48,9 +52,26 @@ class RaftRuntime(
             if (node.role != RaftRole.LEADER) {
                 return
             }
-            val request = node.createAppendEntries(peerId)
-            val response = transport.appendEntries(peerId, request)
-            node.handleAppendEntriesResponse(peerId, request, response)
+            replicatePeer(peerId)
+        }
+    }
+
+    private suspend fun replicatePeer(
+        peerId: String,
+        initialRequest: AppendEntriesRequest? = null,
+    ) {
+        if (node !is LeaderNode) {
+            throw IllegalStateException("Only leader handles replicate")
+        }
+        var request = initialRequest
+        while (node.role == RaftRole.LEADER) {
+            val currentRequest = request ?: node.createAppendEntries(peerId)
+            val response = transport.appendEntries(peerId, currentRequest)
+            node.handleAppendEntriesResponse(peerId, currentRequest, response)
+            if (response.success || response.term > currentRequest.term) {
+                return
+            }
+            request = null
         }
     }
 }

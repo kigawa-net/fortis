@@ -26,8 +26,12 @@ data class ElectionStarter(
         votesGranted.clear()
         votesGranted.add(nodeId)
 
-        if (hasMajority(peers, votesGranted)) {
-            role = becomeLeader(peers).second
+        val updatedPeers = if (hasMajority(peers, votesGranted)) {
+            val leaderState = becomeLeader(peers)
+            role = leaderState.second
+            leaderState.first
+        } else {
+            peers
         }
 
         val lastLogIndex = log.lastIndex()
@@ -39,7 +43,7 @@ data class ElectionStarter(
                 lastLogTerm = log.get(lastLogIndex)?.term ?: 0L,
             ),
             role,
-            peers
+            updatedPeers
         )
     }
 

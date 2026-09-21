@@ -107,7 +107,7 @@ class RaftNodeElectionTest {
             response = RequestVoteResponse(term = 2, voteGranted = true),
         )
 
-        for (progress in fixture.peers.values) {
+        for (progress in fixture.node.peers.values) {
             assertEquals(3L, progress.nextIndex)
             assertEquals(0L, progress.matchIndex)
         }

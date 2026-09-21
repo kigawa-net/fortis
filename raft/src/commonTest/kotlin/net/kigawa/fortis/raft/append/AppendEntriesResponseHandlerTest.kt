@@ -27,7 +27,7 @@ class AppendEntriesResponseHandlerTest {
         }
         val progress = RaftPeerProgress(nextIndex = 1)
 
-        fixture.handler.handle(
+        val updatedPeers = fixture.handler.handle(
             peerId = "peer",
             peers = mapOf(
                 "peer" to progress,
@@ -38,8 +38,8 @@ class AppendEntriesResponseHandlerTest {
             role = net.kigawa.fortis.raft.RaftRole.LEADER,
         ) {}
 
-        assertEquals(2L, progress.matchIndex)
-        assertEquals(3L, progress.nextIndex)
+        assertEquals(2L, updatedPeers.getValue("peer").matchIndex)
+        assertEquals(3L, updatedPeers.getValue("peer").nextIndex)
     }
 
     @Test
@@ -47,7 +47,7 @@ class AppendEntriesResponseHandlerTest {
         val fixture = fixture(currentTerm = 2)
         val progress = RaftPeerProgress(nextIndex = 5)
 
-        fixture.handler.handle(
+        val updatedPeers = fixture.handler.handle(
             peerId = "peer",
             peers = mapOf("peer" to progress),
             request = request(term = 2),
@@ -55,8 +55,8 @@ class AppendEntriesResponseHandlerTest {
             role = net.kigawa.fortis.raft.RaftRole.LEADER,
         ) {}
 
-        assertEquals(4L, progress.nextIndex)
-        assertEquals(0L, progress.matchIndex)
+        assertEquals(4L, updatedPeers.getValue("peer").nextIndex)
+        assertEquals(0L, updatedPeers.getValue("peer").matchIndex)
     }
 
     @Test
@@ -64,7 +64,7 @@ class AppendEntriesResponseHandlerTest {
         val fixture = fixture(currentTerm = 2)
         val progress = RaftPeerProgress(nextIndex = 1)
 
-        fixture.handler.handle(
+        val updatedPeers = fixture.handler.handle(
             peerId = "peer",
             peers = mapOf("peer" to progress),
             request = request(term = 2),
@@ -72,7 +72,7 @@ class AppendEntriesResponseHandlerTest {
             role = net.kigawa.fortis.raft.RaftRole.LEADER,
         ) {}
 
-        assertEquals(1L, progress.nextIndex)
+        assertEquals(1L, updatedPeers.getValue("peer").nextIndex)
     }
 
     @Test
