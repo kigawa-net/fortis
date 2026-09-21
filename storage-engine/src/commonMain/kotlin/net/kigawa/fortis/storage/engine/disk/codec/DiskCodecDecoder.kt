@@ -26,8 +26,8 @@ data class DiskCodecDecoder(
 
         val operation =
             when (data[5]) {
-                put -> DiskOperation.PUT
-                delete -> DiskOperation.DELETE
+                put -> DiskOperation.Put
+                delete -> DiskOperation.Delete
                 else -> throw IllegalArgumentException(
                     "Unknown disk operation: ${data[5]}"
                 )
@@ -38,13 +38,7 @@ data class DiskCodecDecoder(
 
         require(keyLength >= 0)
 
-        when (operation) {
-            DiskOperation.PUT ->
-                require(valueLength >= 0)
-
-            DiskOperation.DELETE ->
-                require(valueLength == -1)
-        }
+        operation.validateValueLength(valueLength)
 
         return DiskRecordHeader(
             operation = operation,

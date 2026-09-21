@@ -5,7 +5,6 @@ import net.kigawa.fortis.storage.engine.ByteArrayKey
 import net.kigawa.fortis.storage.engine.disk.DiskCorruptionException
 import net.kigawa.fortis.storage.engine.disk.DiskIndexEntry
 import net.kigawa.fortis.storage.engine.disk.codec.DiskCodec
-import net.kigawa.fortis.storage.engine.disk.codec.DiskOperation
 
 data class DiskStorageIndexBuilder(
     val input: FsInput,
@@ -58,25 +57,7 @@ data class DiskStorageIndexBuilder(
 
             indexReader.readFully(offset + diskCodec.headerSize, key)
 
-            when (header.operation) {
-                DiskOperation.PUT -> {
-                    index[ByteArrayKey(key)] =
-                        DiskIndexEntry(
-                            valueOffset =
-                                offset +
-                                    diskCodec.headerSize +
-                                    header.keyLength,
-                            valueLength =
-                                header.valueLength,
-                        )
-                }
-
-                DiskOperation.DELETE -> {
-                    index.remove(
-                        ByteArrayKey(key)
-                    )
-                }
-            }
+            header.operation.execute(index, key, offset, diskCodec, header)
 
             offset += recordSize
         }
