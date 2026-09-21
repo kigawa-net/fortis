@@ -1,21 +1,20 @@
 package net.kigawa.fortis.raft.append
 
 
+import net.kigawa.fortis.raft.RaftCommitAdvancer
 import net.kigawa.fortis.raft.RaftPeerProgress
 import net.kigawa.fortis.raft.RaftPersistentState
-import net.kigawa.fortis.raft.log.RaftLog
-import net.kigawa.fortis.raft.vote.RaftVolatileState
 
 class AppendEntriesResponseHandler(
     private val persistentState: RaftPersistentState,
-    private val volatileState: RaftVolatileState,
-    private val log: RaftLog,
+    private val commitAdvancer: RaftCommitAdvancer,
 ) {
-    fun handle(
+    suspend fun handle(
         progress: RaftPeerProgress,
+        peers: Collection<RaftPeerProgress>,
         request: AppendEntriesRequest,
         response: AppendEntriesResponse,
-    ) {
+    ){
         if (response.term > persistentState.currentTerm) {
             persistentState.currentTerm = response.term
             persistentState.votedFor = null
@@ -40,5 +39,7 @@ class AppendEntriesResponseHandler(
 
         progress.nextIndex =
             progress.matchIndex + 1
+
+        commitAdvancer.advance(peers)
     }
 }
