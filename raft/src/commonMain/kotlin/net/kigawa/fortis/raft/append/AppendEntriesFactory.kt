@@ -25,13 +25,26 @@ class AppendEntriesFactory(
                 "Unknown peer: $peerId"
             }
 
-        return createInternal(
-            progress,
-        )
+        return createInternal(progress, includeEntries = true)
+    }
+
+    suspend fun createHeartbeat(
+        peerId: String,
+        role: RaftRole,
+        peers: Map<String, RaftPeerProgress>,
+    ): AppendEntriesRequest {
+        check(role == RaftRole.LEADER) {
+            "Only leader can create heartbeat"
+        }
+        val progress = requireNotNull(peers[peerId]) {
+            "Unknown peer: $peerId"
+        }
+        return createInternal(progress, includeEntries = false)
     }
 
     private suspend fun createInternal(
         progress: RaftPeerProgress,
+        includeEntries: Boolean,
     ): AppendEntriesRequest {
         val prevLogIndex = progress.nextIndex - 1
         val prevLogTerm =
@@ -44,12 +57,14 @@ class AppendEntriesFactory(
 
         val entries = mutableListOf<RaftLogEntry>()
 
-        var index = progress.nextIndex
-        val lastIndex = log.lastIndex()
+        if (includeEntries) {
+            var index = progress.nextIndex
+            val lastIndex = log.lastIndex()
 
-        while (index <= lastIndex) {
-            entries += requireNotNull(log.get(index))
-            index++
+            while (index <= lastIndex) {
+                entries += requireNotNull(log.get(index))
+                index++
+            }
         }
 
         return AppendEntriesRequest(

@@ -15,6 +15,7 @@ data class RaftNodeBuilder(
     val volatileState: RaftVolatileState,
     val log: RaftLog,
     val stateMachine: RaftStateMachine,
+    val timer: RaftTimer = RaftTimer.None,
     val applier: RaftApplier =
         RaftApplier(
             volatileState = volatileState,
@@ -25,7 +26,6 @@ data class RaftNodeBuilder(
         RequestVoteHandler(
             state = persistentState,
             log = log,
-            persistentState = persistentState,
         ),
     private val appendEntriesHandler: AppendEntriesHandler =
         AppendEntriesHandler(
@@ -81,5 +81,6 @@ data class RaftNodeBuilder(
         commandAppender,
         electionStarter,
         requestVoteResponseHandler,
+        timer,
     )
 }

@@ -6,9 +6,9 @@ import net.kigawa.fortis.raft.log.RaftLog
 import net.kigawa.fortis.raft.vote.RaftVolatileState
 
 class RaftApplier(
-    private val volatileState: RaftVolatileState,
-    private val log: RaftLog,
-    private val stateMachine: RaftStateMachine,
+    val volatileState: RaftVolatileState,
+    val log: RaftLog,
+    val stateMachine: RaftStateMachine,
 ) {
     private val mutex = Mutex()
 

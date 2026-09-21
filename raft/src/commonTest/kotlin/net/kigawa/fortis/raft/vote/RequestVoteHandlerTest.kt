@@ -168,7 +168,7 @@ class RequestVoteHandlerTest {
     private fun handler(
         state: RaftPersistentState,
         log: MemoryRaftLog = MemoryRaftLog(),
-    ) = RequestVoteHandler(state, log, state)
+    ) = RequestVoteHandler(state, log)
 
     private fun request(
         term: Long,

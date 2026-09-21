@@ -20,6 +20,7 @@ class RaftNode(
     val commandAppender: CommandAppender,
     val electionStarter: ElectionStarter,
     val requestVoteResponseHandler: RequestVoteResponseHandler,
+    val timer: RaftTimer,
 ) {
     private val mutex = Mutex()
     private val votesGranted = mutableSetOf<String>()
@@ -31,11 +32,19 @@ class RaftNode(
     }
 
     suspend fun handleRequestVote(request: RequestVoteRequest): RequestVoteResponse = mutex.withLock {
-        requestVoteHandler.handle(request, ::setRole)
+        requestVoteHandler.handle(request, ::setRole).also { response ->
+            if (response.voteGranted) {
+                timer.reset(RaftTimeoutEvent.Election)
+            }
+        }
     }
 
     suspend fun handleAppendEntries(request: AppendEntriesRequest): AppendEntriesResponse = mutex.withLock {
-        appendEntriesHandler.handle(request, ::setRole)
+        appendEntriesHandler.handle(request, ::setRole).also { response ->
+            if (request.term >= response.term) {
+                timer.reset(RaftTimeoutEvent.Election)
+            }
+        }
     }
 
     suspend fun createAppendEntries(peerId: String): AppendEntriesRequest = mutex.withLock {
@@ -53,11 +62,43 @@ class RaftNode(
     }
 
     suspend fun startElection(): RequestVoteRequest = mutex.withLock {
-        electionStarter.startElection(votesGranted, peers, ::setRole)
+        startElectionLocked()
     }
 
     suspend fun handleRequestVoteResponse(peerId: String, response: RequestVoteResponse): Unit = mutex.withLock {
+        val previousRole = role
         requestVoteResponseHandler.handle(peerId, response, peers, role, votesGranted, ::setRole)
+        if (previousRole != RaftRole.LEADER && role == RaftRole.LEADER) {
+            timer.reset(RaftTimeoutEvent.Heartbeat)
+        }
+    }
+
+    suspend fun onElectionTimeout(): RequestVoteRequest = mutex.withLock {
+        startElectionLocked()
+    }
+
+    suspend fun onHeartbeatTimeout(): Map<String, AppendEntriesRequest> = mutex.withLock {
+        check(role == RaftRole.LEADER) {
+            "Only leader handles heartbeat timeout"
+        }
+        val requests = mutableMapOf<String, AppendEntriesRequest>()
+        for (peerId in peers.keys) {
+            requests[peerId] = appendEntriesFactory.createHeartbeat(peerId, role, peers)
+        }
+        timer.reset(RaftTimeoutEvent.Heartbeat)
+        requests
+    }
+
+    private suspend fun startElectionLocked(): RequestVoteRequest {
+        val request = electionStarter.startElection(votesGranted, peers, ::setRole)
+        timer.reset(
+            if (role == RaftRole.LEADER) {
+                RaftTimeoutEvent.Heartbeat
+            } else {
+                RaftTimeoutEvent.Election
+            }
+        )
+        return request
     }
 
 }

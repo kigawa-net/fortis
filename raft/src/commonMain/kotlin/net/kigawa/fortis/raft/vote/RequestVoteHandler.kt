@@ -7,10 +7,9 @@ import net.kigawa.fortis.raft.RaftRole
 import net.kigawa.fortis.raft.log.RaftLog
 
 
-data class RequestVoteHandler(
-    val state: RaftPersistentState,
-    val log: RaftLog,
-    val persistentState: RaftPersistentState,
+class RequestVoteHandler(
+    private val state: RaftPersistentState,
+    private val log: RaftLog,
 ) {
     private val mutex = Mutex()
     suspend fun handle(
@@ -18,12 +17,12 @@ data class RequestVoteHandler(
         setRole: (RaftRole) -> Unit,
     ): RequestVoteResponse {
         val previousTerm =
-            persistentState.currentTerm
+            state.currentTerm
 
         val response = handleLock(request)
 
         if (
-            persistentState.currentTerm >
+            state.currentTerm >
             previousTerm
         ) {
             setRole(RaftRole.FOLLOWER)

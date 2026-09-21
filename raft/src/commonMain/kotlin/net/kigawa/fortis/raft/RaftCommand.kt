@@ -33,9 +33,7 @@ sealed interface RaftCommand {
 
             other as Delete
 
-            if (!key.contentEquals(other.key)) return false
-
-            return true
+            return key.contentEquals(other.key)
         }
 
         override fun hashCode(): Int {
