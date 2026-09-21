@@ -32,7 +32,7 @@ class RaftNodeTimeoutTest {
     }
 
     @Test
-    fun heartbeatTimeoutCreatesEmptyAppendEntriesForEveryPeer() = runTest {
+    fun heartbeatTimeoutReplicatesPendingEntriesForEveryPeer() = runTest {
         val fixture = electedLeader()
         fixture.node.appendCommand(command())
         fixture.timer.events.clear()
@@ -40,7 +40,7 @@ class RaftNodeTimeoutTest {
         val heartbeats = fixture.node.onHeartbeatTimeout()
 
         assertEquals(setOf("peer-1", "peer-2"), heartbeats.keys)
-        assertTrue(heartbeats.values.all { it.entries.isEmpty() })
+        assertTrue(heartbeats.values.all { it.entries.size == 1 })
         assertEquals(
             listOf<RaftTimeoutEvent>(RaftTimeoutEvent.Heartbeat),
             fixture.timer.events,

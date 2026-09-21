@@ -1,6 +1,6 @@
 package net.kigawa.fortis.raft
 
 data class RaftPeerProgress(
-    var nextIndex: Long,
+    val nextIndex: Long,
     var matchIndex: Long = 0,
 )

@@ -48,17 +48,15 @@ class AppendEntriesResponseHandler(
         peers: Collection<RaftPeerProgress>,
         request: AppendEntriesRequest,
         response: AppendEntriesResponse,
-    ) {
+    ): RaftPeerProgress {
         if (response.term > persistentState.currentTerm) {
             persistentState.currentTerm = response.term
             persistentState.votedFor = null
-            return
+            return progress
         }
 
         if (!response.success) {
-            progress.nextIndex =
-                maxOf(1L, progress.nextIndex - 1)
-            return
+            return progress.copy(nextIndex = maxOf(1L, progress.nextIndex - 1))
         }
 
         val lastSentIndex =
@@ -71,10 +69,10 @@ class AppendEntriesResponseHandler(
                 lastSentIndex,
             )
 
-        progress.nextIndex =
-            progress.matchIndex + 1
+        val result = progress.copy(nextIndex = progress.matchIndex + 1)
 
         commitAdvancer.advance(peers)
         applier.applyCommitted()
+        return result
     }
 }

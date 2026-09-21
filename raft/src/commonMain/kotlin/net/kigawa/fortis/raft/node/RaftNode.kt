@@ -12,7 +12,7 @@ import net.kigawa.fortis.raft.vote.RequestVoteRequest
 import net.kigawa.fortis.raft.vote.RequestVoteResponse
 
 class RaftNode(
-    val peers: MutableMap<String, RaftPeerProgress>,
+    var peers: Map<String, RaftPeerProgress>,
     val requestVoteHandler: RequestVoteHandler,
     val appendEntriesHandler: AppendEntriesHandler,
     val appendEntriesResponseHandler: AppendEntriesResponseHandler,
@@ -83,14 +83,18 @@ class RaftNode(
         }
         val requests = mutableMapOf<String, AppendEntriesRequest>()
         for (peerId in peers.keys) {
-            requests[peerId] = appendEntriesFactory.createHeartbeat(peerId, role, peers)
+            requests[peerId] = appendEntriesFactory.create(peerId, role, peers)
         }
         timer.reset(RaftTimeoutEvent.Heartbeat)
         requests
     }
 
     private suspend fun startElectionLocked(): RequestVoteRequest {
-        val request = electionStarter.startElection(votesGranted, peers, ::setRole)
+        val request = electionStarter.startElection(
+            votesGranted, peers
+        ).apply { role = second }
+            .apply { peers = third }
+            .first
         timer.reset(
             if (role == RaftRole.LEADER) {
                 RaftTimeoutEvent.Heartbeat

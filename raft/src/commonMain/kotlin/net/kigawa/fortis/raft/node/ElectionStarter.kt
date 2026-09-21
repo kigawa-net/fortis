@@ -15,28 +15,31 @@ data class ElectionStarter(
     suspend fun startElection(
         votesGranted: MutableSet<String>,
         peers: Map<String, RaftPeerProgress>,
-        setRole: (RaftRole) -> Unit,
-    ): RequestVoteRequest {
+    ): Triple<RequestVoteRequest, RaftRole, Map<String, RaftPeerProgress>> {
         check(persistentState.currentTerm < Long.MAX_VALUE) {
             "Raft term is exhausted"
         }
 
         persistentState.currentTerm++
         persistentState.votedFor = nodeId
-        setRole(RaftRole.CANDIDATE)
+        var role = RaftRole.CANDIDATE
         votesGranted.clear()
         votesGranted.add(nodeId)
 
         if (hasMajority(peers, votesGranted)) {
-            becomeLeader(peers, setRole)
+            role = becomeLeader(peers).second
         }
 
         val lastLogIndex = log.lastIndex()
-        return RequestVoteRequest(
-            term = persistentState.currentTerm,
-            candidateId = nodeId,
-            lastLogIndex = lastLogIndex,
-            lastLogTerm = log.get(lastLogIndex)?.term ?: 0L,
+        return Triple(
+            RequestVoteRequest(
+                term = persistentState.currentTerm,
+                candidateId = nodeId,
+                lastLogIndex = lastLogIndex,
+                lastLogTerm = log.get(lastLogIndex)?.term ?: 0L,
+            ),
+            role,
+            peers
         )
     }
 
@@ -45,12 +48,13 @@ data class ElectionStarter(
         return votesGranted.size >= clusterSize / 2 + 1
     }
 
-    suspend fun becomeLeader(peers: Map<String, RaftPeerProgress>, setRole: (RaftRole) -> Unit) {
-        setRole(RaftRole.LEADER)
+    suspend fun becomeLeader(
+        peers: Map<String, RaftPeerProgress>,
+    ): Pair<Map<String, RaftPeerProgress>, RaftRole> {
         val nextIndex = log.lastIndex() + 1
-        for (progress in peers.values) {
-            progress.nextIndex = nextIndex
-            progress.matchIndex = 0
-        }
+        return Pair(
+            peers.mapValues { it.value.copy(nextIndex = nextIndex, matchIndex = 0) },
+            RaftRole.LEADER
+        )
     }
 }
