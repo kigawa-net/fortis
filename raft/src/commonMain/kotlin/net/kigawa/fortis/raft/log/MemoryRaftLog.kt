@@ -9,21 +9,21 @@ class MemoryRaftLog : RaftLog {
     private val mutex = Mutex()
 
     override suspend fun lastIndex(): Long =
-        entries.lastOrNull()?.index ?: 0L
-
+        mutex.withLock {
+            entries.lastOrNull()?.index ?: 0L
+        }
     override suspend fun get(
         index: Long,
-    ): RaftLogEntry? {
-        if (index <= 0) {
-            return null
+    ): RaftLogEntry? =
+        mutex.withLock {
+            if (index <= 0 || index > Int.MAX_VALUE) {
+                return@withLock null
+            }
+
+            entries.getOrNull(
+                (index - 1).toInt()
+            )
         }
-        if (index <= 0 || index > Int.MAX_VALUE) {
-            return null
-        }
-        return entries.getOrNull(
-            (index - 1).toInt()
-        )
-    }
     override suspend fun append(
         entry: RaftLogEntry,
     ): Unit = mutex.withLock {

@@ -1,4 +1,4 @@
-package net.kigawa.fortis.raft
+package net.kigawa.fortis.raft.vote
 
 data class RequestVoteRequest(
     val term: Long,
