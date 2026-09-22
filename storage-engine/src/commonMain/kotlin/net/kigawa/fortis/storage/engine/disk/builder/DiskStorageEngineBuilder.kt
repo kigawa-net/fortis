@@ -5,7 +5,7 @@ import net.kigawa.fortis.io.fs.FsFileNotFoundException
 import net.kigawa.fortis.io.fs.openRead
 import net.kigawa.fortis.storage.engine.ByteArrayKey
 import net.kigawa.fortis.storage.engine.disk.DiskIndexEntry
-import net.kigawa.fortis.storage.engine.disk.DiskStorageEngine
+import net.kigawa.fortis.storage.engine.disk.engine.DiskStorageEngine
 import net.kigawa.fortis.storage.engine.disk.codec.DiskCodec
 
 data class DiskStorageEngineBuilder(

@@ -1,12 +1,12 @@
-package net.kigawa.fortis.storage.engine.disk
+package net.kigawa.fortis.storage.engine.disk.engine
 
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import net.kigawa.fortis.io.fs.FortisFile
-import net.kigawa.fortis.io.fs.openRead
 import net.kigawa.fortis.io.fs.openWrite
 import net.kigawa.fortis.storage.engine.ByteArrayKey
 import net.kigawa.fortis.storage.engine.FortisStorageEngine
+import net.kigawa.fortis.storage.engine.disk.DiskIndexEntry
 import net.kigawa.fortis.storage.engine.disk.builder.DiskStorageEngineBuilder
 import net.kigawa.fortis.storage.engine.disk.codec.DiskCodec
 
@@ -17,41 +17,13 @@ class DiskStorageEngine(
     val diskCodec: DiskCodec,
 ): FortisStorageEngine {
     private val mutex = Mutex()
+    val diskStorageGetter = DiskStorageGetter(mutex, index,file)
 
     companion object {
         val builder = ::DiskStorageEngineBuilder
     }
 
-    override suspend fun get(
-        key: ByteArray,
-    ): ByteArray? = mutex.withLock {
-        val entry = index[ByteArrayKey(key)] ?: return@withLock null
-
-        val value = ByteArray(entry.valueLength)
-
-        file.openRead { input ->
-            var read = 0
-
-            while (read < value.size) {
-                val count = input.readAt(
-                    offset = entry.valueOffset + read,
-                    buffer = value,
-                    bufferOffset = read,
-                    length = value.size - read,
-                )
-
-                if (count <= 0) {
-                    throw DiskCorruptionException(
-                        "Unexpected EOF at offset ${entry.valueOffset + read}"
-                    )
-                }
-
-                read += count
-            }
-        }
-
-        value
-    }
+    override suspend fun get(key: ByteArray): ByteArray? = diskStorageGetter.get(key)
 
     override suspend fun put(
         key: ByteArray,

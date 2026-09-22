@@ -10,6 +10,7 @@ import kotlinx.coroutines.withContext
 import net.kigawa.fortis.io.fs.FsPath
 import net.kigawa.fortis.storage.engine.disk.builder.DiskStorageEngineBuilder
 import net.kigawa.fortis.storage.engine.disk.codec.DiskCodec
+import net.kigawa.fortis.storage.engine.disk.engine.DiskStorageEngine
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertFailsWith
