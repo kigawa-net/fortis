@@ -1,10 +1,5 @@
-@file:Suppress("DEPRECATION")
-
 package net.kigawa.fortis.raft.runtime
 
-import io.netty.handler.codec.quic.QuicSslContextBuilder
-import io.netty.handler.ssl.util.InsecureTrustManagerFactory
-import io.netty.handler.ssl.util.SelfSignedCertificate
 import kotlinx.coroutines.test.runTest
 import net.kigawa.fortis.raft.MemoryRaftPersistentStateStore
 import net.kigawa.fortis.raft.RaftCommand
@@ -15,45 +10,38 @@ import net.kigawa.fortis.raft.node.RaftNodeBuilder
 import net.kigawa.fortis.raft.transport.RaftPeerAddress
 import net.kigawa.fortis.raft.transport.RaftPeerResolver
 import net.kigawa.fortis.raft.transport.RaftRpcHandler
+import net.kigawa.fortis.raft.transport.RaftTransportException
 import net.kigawa.fortis.raft.transport.RpcRaftTransport
 import net.kigawa.fortis.raft.transport.netty.NettyQuicRaftRpcChannel
 import net.kigawa.fortis.raft.transport.netty.NettyQuicRaftRpcServer
+import net.kigawa.fortis.raft.transport.netty.NettyRaftTlsConfig
+import net.kigawa.fortis.raft.transport.netty.TestRaftCertificateAuthority
 import net.kigawa.fortis.raft.vote.RaftVolatileState
+import net.kigawa.fortis.raft.vote.RequestVoteRequest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 
 class NettyQuicRaftRpcIntegrationTest {
     @Test
-    fun threeNodesElectReplicateCommitAndApplyOverLocalhostQuic() = runTest {
-        val certificate = SelfSignedCertificate()
-        val serverSslContext = QuicSslContextBuilder.forServer(
-            certificate.privateKey(),
-            null,
-            certificate.certificate(),
-        ).applicationProtocols(NettyQuicRaftRpcChannel.ALPN).build()
-        val clientSslContext = QuicSslContextBuilder.forClient()
-            .trustManager(InsecureTrustManagerFactory.INSTANCE)
-            .applicationProtocols(NettyQuicRaftRpcChannel.ALPN)
-            .build()
+    fun threeNodesElectReplicateCommitAndApplyOverMutualTlsQuic() = runTest {
+        val authority = TestRaftCertificateAuthority.create()
         val addresses = mutableMapOf<String, RaftPeerAddress>()
-        val resolver = RaftPeerResolver { peerId -> addresses.getValue(peerId) }
-        val channel = NettyQuicRaftRpcChannel(resolver, clientSslContext)
-        val transport = RpcRaftTransport(channel)
-        val nodes = NODE_IDS.associateWith { nodeId -> node(nodeId, transport) }
-        val servers = nodes.map { (nodeId, fixture) ->
-            nodeId to NettyQuicRaftRpcServer(
-                RaftPeerAddress("127.0.0.1", 0),
-                RaftRpcHandler(fixture.runtime),
-                serverSslContext,
-            )
+        val resolver = resolver(addresses)
+        val tlsConfigs = NODE_IDS.associateWith { nodeId -> tlsConfig(authority, nodeId) }
+        val channels = NODE_IDS.associateWith { nodeId ->
+            NettyQuicRaftRpcChannel(resolver, tlsConfigs.getValue(nodeId))
+        }
+        val nodes = NODE_IDS.associateWith { nodeId ->
+            node(nodeId, RpcRaftTransport(channels.getValue(nodeId)))
+        }
+        val servers = NODE_IDS.associateWith { nodeId ->
+            server(nodes.getValue(nodeId), tlsConfigs.getValue(nodeId))
         }
 
         try {
-            for ((nodeId, server) in servers) {
-                server.start()
-                addresses[nodeId] = server.boundAddress
-            }
+            startServers(servers, addresses)
             val leader = nodes.getValue("node-1")
 
             leader.runtime.onElectionTimeout()
@@ -69,17 +57,109 @@ class NettyQuicRaftRpcIntegrationTest {
                 assertEquals(1L, fixture.volatileState.lastApplied)
                 assertEquals(listOf<RaftCommand>(command), fixture.stateMachine.applied)
             }
-            assertEquals(2, channel.connectionCreationCount)
+            assertEquals(2, channels.getValue("node-1").connectionCreationCount)
         } finally {
-            try {
-                channel.close()
-            } finally {
-                try {
-                    servers.forEach { (_, server) -> server.stop() }
-                } finally {
-                    certificate.delete()
-                }
+            close(channels.values, servers.values)
+        }
+    }
+
+    @Test
+    fun serverRejectsClientCertificateFromUnknownAuthority() = runTest {
+        val trustedAuthority = TestRaftCertificateAuthority.create()
+        val unknownAuthority = TestRaftCertificateAuthority.create()
+        val addresses = mutableMapOf<String, RaftPeerAddress>()
+        val channel = NettyQuicRaftRpcChannel(
+            resolver(addresses),
+            NettyRaftTlsConfig(
+                unknownAuthority.identity("node-1"),
+                listOf(trustedAuthority.certificate),
+            ),
+        )
+        val fixture = node("node-2", RpcRaftTransport(channel))
+        val server = server(fixture, tlsConfig(trustedAuthority, "node-2"))
+
+        try {
+            server.start()
+            addresses["node-2"] = server.boundAddress
+
+            assertFailsWith<RaftTransportException> {
+                RpcRaftTransport(channel).requestVote("node-2", voteRequest("node-1"))
             }
+        } finally {
+            close(listOf(channel), listOf(server))
+        }
+    }
+
+    @Test
+    fun clientRejectsCertificateForWrongPeerId() = runTest {
+        val authority = TestRaftCertificateAuthority.create()
+        val addresses = mutableMapOf<String, RaftPeerAddress>()
+        val channel = NettyQuicRaftRpcChannel(
+            resolver(addresses),
+            tlsConfig(authority, "node-1"),
+        )
+        val fixture = node("node-2", RpcRaftTransport(channel))
+        val server = server(fixture, tlsConfig(authority, "node-3"))
+
+        try {
+            server.start()
+            addresses["node-2"] = server.boundAddress
+
+            val error = assertFailsWith<RaftTransportException> {
+                RpcRaftTransport(channel).requestVote("node-2", voteRequest("node-1"))
+            }
+            assertEquals(
+                "Raft TLS peer identity mismatch: expected node-2, got node-3",
+                error.message,
+            )
+        } finally {
+            close(listOf(channel), listOf(server))
+        }
+    }
+
+    @Test
+    fun serverRejectsCertificateForUnknownPeer() = runTest {
+        val authority = TestRaftCertificateAuthority.create()
+        val addresses = mutableMapOf<String, RaftPeerAddress>()
+        val channel = NettyQuicRaftRpcChannel(
+            resolver(addresses),
+            tlsConfig(authority, "node-4"),
+        )
+        val fixture = node("node-2", RpcRaftTransport(channel))
+        val server = server(fixture, tlsConfig(authority, "node-2"))
+
+        try {
+            server.start()
+            addresses["node-2"] = server.boundAddress
+
+            assertFailsWith<RaftTransportException> {
+                RpcRaftTransport(channel).requestVote("node-2", voteRequest("node-4"))
+            }
+        } finally {
+            close(listOf(channel), listOf(server))
+        }
+    }
+
+    @Test
+    fun serverRejectsRpcClaimingAnotherPeerId() = runTest {
+        val authority = TestRaftCertificateAuthority.create()
+        val addresses = mutableMapOf<String, RaftPeerAddress>()
+        val channel = NettyQuicRaftRpcChannel(
+            resolver(addresses),
+            tlsConfig(authority, "node-1"),
+        )
+        val fixture = node("node-2", RpcRaftTransport(channel))
+        val server = server(fixture, tlsConfig(authority, "node-2"))
+
+        try {
+            server.start()
+            addresses["node-2"] = server.boundAddress
+
+            assertFailsWith<RaftTransportException> {
+                RpcRaftTransport(channel).requestVote("node-2", voteRequest("node-3"))
+            }
+        } finally {
+            close(listOf(channel), listOf(server))
         }
     }
 
@@ -105,6 +185,54 @@ class NettyQuicRaftRpcIntegrationTest {
             stateMachine,
         )
     }
+
+    private fun server(
+        fixture: NodeFixture,
+        tlsConfig: NettyRaftTlsConfig,
+    ) = NettyQuicRaftRpcServer(
+        RaftPeerAddress("127.0.0.1", 0),
+        RaftRpcHandler(fixture.runtime),
+        tlsConfig,
+    )
+
+    private suspend fun startServers(
+        servers: Map<String, NettyQuicRaftRpcServer>,
+        addresses: MutableMap<String, RaftPeerAddress>,
+    ) {
+        for ((nodeId, server) in servers) {
+            server.start()
+            addresses[nodeId] = server.boundAddress
+        }
+    }
+
+    private suspend fun close(
+        channels: Collection<NettyQuicRaftRpcChannel>,
+        servers: Collection<NettyQuicRaftRpcServer>,
+    ) {
+        try {
+            channels.forEach { it.close() }
+        } finally {
+            servers.forEach { it.stop() }
+        }
+    }
+
+    private fun tlsConfig(
+        authority: TestRaftCertificateAuthority,
+        peerId: String,
+    ) = NettyRaftTlsConfig(
+        authority.identity(peerId),
+        listOf(authority.certificate),
+    )
+
+    private fun resolver(addresses: Map<String, RaftPeerAddress>) =
+        RaftPeerResolver { peerId -> addresses.getValue(peerId) }
+
+    private fun voteRequest(candidateId: String) = RequestVoteRequest(
+        term = 1,
+        candidateId = candidateId,
+        lastLogIndex = 0,
+        lastLogTerm = 0,
+    )
 
     private data class NodeFixture(
         val runtime: RaftRuntime,

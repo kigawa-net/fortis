@@ -11,9 +11,10 @@ import io.netty.channel.MultiThreadIoEventLoopGroup
 import io.netty.channel.nio.NioIoHandler
 import io.netty.channel.socket.nio.NioDatagramChannel
 import io.netty.handler.codec.quic.QuicServerCodecBuilder
-import io.netty.handler.codec.quic.QuicSslContext
+import io.netty.handler.codec.quic.QuicChannel
 import io.netty.handler.codec.quic.QuicStreamChannel
 import java.net.InetSocketAddress
+import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -26,17 +27,20 @@ import kotlinx.coroutines.sync.withLock
 import net.kigawa.fortis.raft.transport.RaftPeerAddress
 import net.kigawa.fortis.raft.transport.RaftRpcHandler
 import net.kigawa.fortis.raft.transport.RaftRpcServer
+import net.kigawa.fortis.raft.transport.RaftTransportException
 import net.kigawa.fortis.raft.transport.codec.RaftRpcCodec
 import net.kigawa.fortis.raft.transport.codec.RaftRpcDecodeResult
+import net.kigawa.fortis.raft.transport.codec.RaftRpcMessage
 
 class NettyQuicRaftRpcServer(
     private val address: RaftPeerAddress,
     private val handler: RaftRpcHandler,
-    private val sslContext: QuicSslContext,
+    tlsConfig: NettyRaftTlsConfig,
     private val codec: RaftRpcCodec = RaftRpcCodec(),
     dispatcher: CoroutineDispatcher = Dispatchers.Default,
     private val idleTimeoutMillis: Long = DEFAULT_IDLE_TIMEOUT_MILLIS,
 ) : RaftRpcServer {
+    private val sslContext = NettyQuicSslContextFactory.server(tlsConfig)
     private val eventLoopGroup: EventLoopGroup =
         MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory())
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
@@ -104,18 +108,51 @@ class NettyQuicRaftRpcServer(
     private inner class RequestHandler : NettyRaftRpcFrameHandler(codec) {
         override fun onFrame(context: ChannelHandlerContext, frame: ByteArray) {
             val message = (codec.decode(frame) as RaftRpcDecodeResult.Success).message
+            val authenticatedPeerId = authenticatedPeerId(context)
+            if (!handler.isKnownPeer(authenticatedPeerId)) {
+                throw RaftTransportException(
+                    "Authenticated Raft peer is not a cluster member: $authenticatedPeerId",
+                )
+            }
+            val claimedPeerId = claimedPeerId(message)
+            if (authenticatedPeerId != claimedPeerId) {
+                throw RaftTransportException(
+                    "Authenticated Raft peer $authenticatedPeerId cannot send RPC as $claimedPeerId",
+                )
+            }
             scope.launch {
                 try {
                     val response = codec.encode(handler.handle(message))
                     context.writeAndFlush(Unpooled.wrappedBuffer(response))
                         .addListener(QuicStreamChannel.SHUTDOWN_OUTPUT)
                 } catch (cause: Throwable) {
-                    context.fireExceptionCaught(cause)
+                    context.close()
                 }
             }
         }
 
         override fun onFailure(cause: Throwable) = Unit
+    }
+
+    private fun authenticatedPeerId(context: ChannelHandlerContext): String {
+        val connection = context.channel().parent() as? QuicChannel
+            ?: throw RaftTransportException("Raft RPC stream has no QUIC connection")
+        val certificate = connection.sslEngine()
+            ?.session
+            ?.peerCertificates
+            ?.firstOrNull() as? X509Certificate
+            ?: throw RaftTransportException(
+                "Raft TLS client did not provide an X.509 certificate",
+            )
+        return NettyRaftCertificateIdentity.peerId(certificate)
+    }
+
+    private fun claimedPeerId(message: RaftRpcMessage): String = when (message) {
+        is RaftRpcMessage.RequestVote -> message.request.candidateId
+        is RaftRpcMessage.AppendEntries -> message.request.leaderId
+        is RaftRpcMessage.RequestVoteResult,
+        is RaftRpcMessage.AppendEntriesResult,
+        -> throw RaftTransportException("Raft RPC server received a response message")
     }
 
     private fun maximumFrameSize(): Long =

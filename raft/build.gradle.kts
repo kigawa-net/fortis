@@ -24,5 +24,10 @@ kotlin {
             implementation(kotlin("test"))
             implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.1")
         }
+
+        jvmTest.dependencies {
+            implementation("org.bouncycastle:bcpkix-jdk18on:1.86")
+            implementation("org.bouncycastle:bcprov-jdk18on:1.86")
+        }
     }
 }

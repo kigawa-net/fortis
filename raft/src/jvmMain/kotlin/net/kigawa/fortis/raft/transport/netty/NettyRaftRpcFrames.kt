@@ -66,7 +66,13 @@ internal abstract class NettyRaftRpcFrameHandler(
                     fail(context, "Unexpected trailing bytes in Raft RPC frame")
                 } else {
                     delivered = true
-                    onFrame(context, frame)
+                    try {
+                        onFrame(context, frame)
+                    } catch (cause: Throwable) {
+                        failed = true
+                        onFailure(cause)
+                        context.close()
+                    }
                 }
             }
 

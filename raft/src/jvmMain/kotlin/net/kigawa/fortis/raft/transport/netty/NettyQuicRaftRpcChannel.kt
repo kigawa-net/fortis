@@ -11,10 +11,10 @@ import io.netty.channel.nio.NioIoHandler
 import io.netty.channel.socket.nio.NioDatagramChannel
 import io.netty.handler.codec.quic.QuicChannel
 import io.netty.handler.codec.quic.QuicClientCodecBuilder
-import io.netty.handler.codec.quic.QuicSslContext
 import io.netty.handler.codec.quic.QuicStreamChannel
 import io.netty.handler.codec.quic.QuicStreamType
 import java.net.InetSocketAddress
+import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -27,10 +27,11 @@ import net.kigawa.fortis.raft.transport.codec.RaftRpcCodec
 
 class NettyQuicRaftRpcChannel(
     private val peerResolver: RaftPeerResolver,
-    private val sslContext: QuicSslContext,
+    tlsConfig: NettyRaftTlsConfig,
     private val codec: RaftRpcCodec = RaftRpcCodec(),
     private val idleTimeoutMillis: Long = DEFAULT_IDLE_TIMEOUT_MILLIS,
 ) : RaftRpcChannel {
+    private val sslContext = NettyQuicSslContextFactory.client(tlsConfig)
     private val eventLoopGroup: EventLoopGroup =
         MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory())
     private val mutex = Mutex()
@@ -95,6 +96,12 @@ class NettyQuicRaftRpcChannel(
             .remoteAddress(InetSocketAddress(address.host, address.port))
             .connect()
             .awaitResult()
+        try {
+            verifyPeer(connection, peerId)
+        } catch (cause: Throwable) {
+            connection.close().awaitCompletion()
+            throw cause
+        }
         connectionCreationCount++
         connections[peerId] = connection
         connection
@@ -128,6 +135,17 @@ class NettyQuicRaftRpcChannel(
 
     private fun maximumFrameSize(): Long =
         codec.headerSize.toLong() + codec.maxPayloadLength.toLong()
+
+    private fun verifyPeer(connection: QuicChannel, peerId: String) {
+        val certificate = connection.sslEngine()
+            ?.session
+            ?.peerCertificates
+            ?.firstOrNull() as? X509Certificate
+            ?: throw RaftTransportException(
+                "Raft TLS peer did not provide an X.509 certificate: $peerId",
+            )
+        NettyRaftCertificateIdentity.requirePeer(certificate, peerId)
+    }
 
     private class ResponseHandler(
         codec: RaftRpcCodec,
