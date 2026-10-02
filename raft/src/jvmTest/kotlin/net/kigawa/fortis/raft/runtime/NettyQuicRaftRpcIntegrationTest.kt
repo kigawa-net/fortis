@@ -1,16 +1,24 @@
 package net.kigawa.fortis.raft.runtime
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.TimeoutCancellationException
 import java.net.DatagramSocket
 import java.net.InetSocketAddress
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import net.kigawa.fortis.raft.MemoryRaftPersistentStateStore
 import net.kigawa.fortis.raft.RaftCommand
 import net.kigawa.fortis.raft.RaftStateMachine
+import net.kigawa.fortis.raft.append.AppendEntriesRequest
 import net.kigawa.fortis.raft.leader.LeaderNode
 import net.kigawa.fortis.raft.log.MemoryRaftLog
+import net.kigawa.fortis.raft.log.RaftLogEntry
 import net.kigawa.fortis.raft.node.RaftNodeBuilder
+import net.kigawa.fortis.raft.node.RaftTimer
 import net.kigawa.fortis.raft.transport.RaftPeerAddress
 import net.kigawa.fortis.raft.transport.RaftPeerResolver
 import net.kigawa.fortis.raft.transport.RaftRpcHandler
@@ -28,15 +36,163 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 
 class NettyQuicRaftRpcIntegrationTest {
     @Test
-    fun reconnectsAfterServerRestartsOnSamePort() = runTest {
+    fun connectTimeoutAllowsLaterReconnectToAvailablePeer() = runNetworkTest {
+        val authority = TestRaftCertificateAuthority.create()
+        val addresses = mutableMapOf<String, RaftPeerAddress>()
+        val channel = NettyQuicRaftRpcChannel(
+            resolver(addresses), tlsConfig(authority, "node-1"), connectTimeout = 500.milliseconds,
+        )
+        val transport = RpcRaftTransport(channel)
+        val server = server(node("node-2", transport), tlsConfig(authority, "node-2"))
+        try {
+            // A bound UDP socket silently drops QUIC packets instead of returning ICMP errors.
+            val blackhole = withContext(Dispatchers.IO) {
+                DatagramSocket(InetSocketAddress("127.0.0.1", 0))
+            }
+            blackhole.use {
+                addresses["node-2"] = RaftPeerAddress("127.0.0.1", it.localPort)
+                val error = withTimeout(3.seconds) {
+                    assertFailsWith<RaftTransportException> {
+                        transport.requestVote("node-2", voteRequest("node-1"))
+                    }
+                }
+                assertEquals("Raft RPC connection to node-2 timed out after 500ms", error.message)
+                assertEquals(0, channel.connectionCreationCount)
+            }
+            server.start()
+            addresses["node-2"] = server.boundAddress
+            assertTrue(transport.requestVote("node-2", voteRequest("node-1")).voteGranted)
+            assertEquals(1, channel.connectionCreationCount)
+        } finally {
+            close(listOf(channel), listOf(server))
+        }
+    }
+
+    @Test
+    fun requestTimeoutEvictsConnectionAndAllowsNextRpcToReconnect() = runNetworkTest {
+        stalledRequest(callerCancels = false)
+    }
+
+    @Test
+    fun callerTimeoutRemainsCancellationAndAllowsNextRpcOnSameConnection() = runNetworkTest {
+        stalledRequest(callerCancels = true)
+    }
+
+    private suspend fun stalledRequest(callerCancels: Boolean) {
+        val authority = TestRaftCertificateAuthority.create()
+        val addresses = mutableMapOf<String, RaftPeerAddress>()
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val stateMachine = RecordingStateMachine {
+            entered.complete(Unit)
+            release.await()
+        }
+        val channel = NettyQuicRaftRpcChannel(
+            resolver(addresses), tlsConfig(authority, "node-1"),
+            requestTimeout = if (callerCancels) 5.seconds else 500.milliseconds,
+        )
+        val transport = RpcRaftTransport(channel)
+        val fixture = node("node-2", transport, stateMachine)
+        val server = server(fixture, tlsConfig(authority, "node-2"))
+        val command = RaftCommand.Put(byteArrayOf(1), byteArrayOf(10))
+        val request = AppendEntriesRequest(
+            term = 1, leaderId = "node-1", prevLogIndex = 0, prevLogTerm = 0,
+            entries = listOf(RaftLogEntry(index = 1, term = 1, command = command)),
+            leaderCommit = 1,
+        )
+        try {
+            server.start()
+            addresses["node-2"] = server.boundAddress
+            // Complete the handshake before timing only the stalled RPC.
+            assertTrue(transport.requestVote("node-2", voteRequest("node-1")).voteGranted)
+            if (callerCancels) {
+                assertFailsWith<TimeoutCancellationException> {
+                    withTimeout(500.milliseconds) { transport.appendEntries("node-2", request) }
+                }
+            } else {
+                val error = withTimeout(3.seconds) {
+                    assertFailsWith<RaftTransportException> {
+                        transport.appendEntries("node-2", request)
+                    }
+                }
+                assertEquals("Raft RPC request to node-2 timed out after 500ms", error.message)
+            }
+            assertTrue(entered.isCompleted)
+            assertEquals(emptyList(), stateMachine.applied)
+            release.complete(Unit)
+            assertTrue(transport.appendEntries("node-2", request).success)
+            assertEquals(listOf<RaftCommand>(command), stateMachine.applied)
+            assertEquals(1L, fixture.volatileState.lastApplied)
+            assertEquals(if (callerCancels) 1 else 2, channel.connectionCreationCount)
+        } finally {
+            release.complete(Unit)
+            close(listOf(channel), listOf(server))
+        }
+    }
+
+    @Test
+    fun timedOutFollowerDoesNotPreventHeartbeatToHealthyFollower() = runNetworkTest {
+        val authority = TestRaftCertificateAuthority.create()
+        val addresses = mutableMapOf<String, RaftPeerAddress>()
+        val release = CompletableDeferred<Unit>()
+        val entered = CompletableDeferred<Unit>()
+        val healthyHeartbeats = AtomicInteger()
+        val stalledStateMachine = RecordingStateMachine {
+            entered.complete(Unit)
+            release.await()
+        }
+        val tlsConfigs = NODE_IDS.associateWith { tlsConfig(authority, it) }
+        val channels = NODE_IDS.associateWith {
+            NettyQuicRaftRpcChannel(
+                resolver(addresses), tlsConfigs.getValue(it), requestTimeout = 500.milliseconds,
+            )
+        }
+        val nodes = NODE_IDS.associateWith {
+            node(
+                it, RpcRaftTransport(channels.getValue(it)),
+                if (it == "node-2") stalledStateMachine else RecordingStateMachine(),
+                if (it == "node-3") RaftTimer { healthyHeartbeats.incrementAndGet() } else RaftTimer.None,
+            )
+        }
+        val servers = NODE_IDS.associateWith { server(nodes.getValue(it), tlsConfigs.getValue(it)) }
+        try {
+            startServers(servers, addresses)
+            val leader = nodes.getValue("node-1")
+            leader.runtime.onElectionTimeout()
+            assertIs<LeaderNode>(leader.runtime.currentNode)
+            val command = RaftCommand.Put(byteArrayOf(1), byteArrayOf(10))
+            leader.runtime.appendCommand(command)
+            val heartbeatsBeforeTimeout = healthyHeartbeats.get()
+            withTimeout(3.seconds) { leader.runtime.onHeartbeatTimeout() }
+            assertEquals(heartbeatsBeforeTimeout + 1, healthyHeartbeats.get())
+            assertTrue(entered.isCompleted)
+            assertIs<LeaderNode>(leader.runtime.currentNode)
+            assertEquals(1L, leader.volatileState.commitIndex)
+            assertEquals(listOf<RaftCommand>(command), leader.stateMachine.applied)
+            assertEquals(listOf<RaftCommand>(command), nodes.getValue("node-3").stateMachine.applied)
+            assertEquals(emptyList(), stalledStateMachine.applied)
+            release.complete(Unit)
+            leader.runtime.onHeartbeatTimeout()
+            assertEquals(listOf<RaftCommand>(command), stalledStateMachine.applied)
+            assertEquals(3, channels.getValue("node-1").connectionCreationCount)
+        } finally {
+            release.complete(Unit)
+            close(channels.values, servers.values)
+        }
+    }
+
+    @Test
+    fun reconnectsAfterServerRestartsOnSamePort() = runNetworkTest {
         reconnectAfterServerRestart(changePort = false)
     }
 
     @Test
-    fun reconnectsToUpdatedResolverAddressAfterServerRestarts() = runTest {
+    fun reconnectsToUpdatedResolverAddressAfterServerRestarts() = runNetworkTest {
         reconnectAfterServerRestart(changePort = true)
     }
 
@@ -96,7 +252,7 @@ class NettyQuicRaftRpcIntegrationTest {
     }
 
     @Test
-    fun offlineFollowerCatchesUpAndAppliesCommittedCommandsAfterQuicServerRestart() = runTest {
+    fun offlineFollowerCatchesUpAndAppliesCommittedCommandsAfterQuicServerRestart() = runNetworkTest {
         val authority = TestRaftCertificateAuthority.create()
         val addresses = mutableMapOf<String, RaftPeerAddress>()
         val tlsConfigs = NODE_IDS.associateWith { tlsConfig(authority, it) }
@@ -161,7 +317,7 @@ class NettyQuicRaftRpcIntegrationTest {
     }
 
     @Test
-    fun threeNodesElectReplicateCommitAndApplyOverMutualTlsQuic() = runTest {
+    fun threeNodesElectReplicateCommitAndApplyOverMutualTlsQuic() = runNetworkTest {
         val authority = TestRaftCertificateAuthority.create()
         val addresses = mutableMapOf<String, RaftPeerAddress>()
         val resolver = resolver(addresses)
@@ -200,7 +356,7 @@ class NettyQuicRaftRpcIntegrationTest {
     }
 
     @Test
-    fun serverRejectsClientCertificateFromUnknownAuthority() = runTest {
+    fun serverRejectsClientCertificateFromUnknownAuthority() = runNetworkTest {
         val trustedAuthority = TestRaftCertificateAuthority.create()
         val unknownAuthority = TestRaftCertificateAuthority.create()
         val addresses = mutableMapOf<String, RaftPeerAddress>()
@@ -227,7 +383,7 @@ class NettyQuicRaftRpcIntegrationTest {
     }
 
     @Test
-    fun clientRejectsCertificateForWrongPeerId() = runTest {
+    fun clientRejectsCertificateForWrongPeerId() = runNetworkTest {
         val authority = TestRaftCertificateAuthority.create()
         val addresses = mutableMapOf<String, RaftPeerAddress>()
         val channel = NettyQuicRaftRpcChannel(
@@ -254,7 +410,7 @@ class NettyQuicRaftRpcIntegrationTest {
     }
 
     @Test
-    fun serverRejectsCertificateForUnknownPeer() = runTest {
+    fun serverRejectsCertificateForUnknownPeer() = runNetworkTest {
         val authority = TestRaftCertificateAuthority.create()
         val addresses = mutableMapOf<String, RaftPeerAddress>()
         val channel = NettyQuicRaftRpcChannel(
@@ -277,7 +433,7 @@ class NettyQuicRaftRpcIntegrationTest {
     }
 
     @Test
-    fun serverRejectsRpcClaimingAnotherPeerId() = runTest {
+    fun serverRejectsRpcClaimingAnotherPeerId() = runNetworkTest {
         val authority = TestRaftCertificateAuthority.create()
         val addresses = mutableMapOf<String, RaftPeerAddress>()
         val channel = NettyQuicRaftRpcChannel(
@@ -302,10 +458,11 @@ class NettyQuicRaftRpcIntegrationTest {
     private suspend fun node(
         nodeId: String,
         transport: RpcRaftTransport,
+        stateMachine: RecordingStateMachine = RecordingStateMachine(),
+        timer: RaftTimer = RaftTimer.None,
     ): NodeFixture {
         val volatileState = RaftVolatileState()
         val log = MemoryRaftLog()
-        val stateMachine = RecordingStateMachine()
         val initialNode = RaftNodeBuilder(
             nodeId = nodeId,
             peerIds = NODE_IDS - nodeId,
@@ -313,6 +470,7 @@ class NettyQuicRaftRpcIntegrationTest {
             volatileState = volatileState,
             log = log,
             stateMachine = stateMachine,
+            timer = timer,
         ).build()
         return NodeFixture(
             RaftRuntime(initialNode, transport),
@@ -378,12 +536,20 @@ class NettyQuicRaftRpcIntegrationTest {
         val stateMachine: RecordingStateMachine,
     )
 
-    private class RecordingStateMachine : RaftStateMachine {
+    private class RecordingStateMachine(
+        private val beforeApply: suspend () -> Unit = {},
+    ) : RaftStateMachine {
         val applied = mutableListOf<RaftCommand>()
 
         override suspend fun apply(command: RaftCommand) {
+            beforeApply()
             applied.add(command)
         }
+    }
+
+    // Netty uses wall-clock deadlines; run coroutine timeouts on the same clock.
+    private fun runNetworkTest(block: suspend CoroutineScope.() -> Unit) = runTest {
+        withContext(Dispatchers.Default, block)
     }
 
     private companion object {

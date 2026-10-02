@@ -5,6 +5,7 @@ import io.netty.buffer.Unpooled
 import io.netty.channel.Channel
 import io.netty.channel.ChannelHandlerContext
 import io.netty.channel.ChannelInboundHandlerAdapter
+import io.netty.channel.ChannelInitializer
 import io.netty.channel.EventLoopGroup
 import io.netty.channel.MultiThreadIoEventLoopGroup
 import io.netty.channel.nio.NioIoHandler
@@ -16,10 +17,15 @@ import io.netty.handler.codec.quic.QuicStreamType
 import java.net.InetSocketAddress
 import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
 import net.kigawa.fortis.raft.transport.RaftPeerResolver
 import net.kigawa.fortis.raft.transport.RaftRpcChannel
 import net.kigawa.fortis.raft.transport.RaftTransportException
@@ -30,7 +36,18 @@ class NettyQuicRaftRpcChannel(
     tlsConfig: NettyRaftTlsConfig,
     private val codec: RaftRpcCodec = RaftRpcCodec(),
     private val idleTimeoutMillis: Long = DEFAULT_IDLE_TIMEOUT_MILLIS,
+    private val connectTimeout: Duration = 1.seconds,
+    private val requestTimeout: Duration = 1.seconds,
 ) : RaftRpcChannel {
+    init {
+        require(connectTimeout.isPositive() && connectTimeout.isFinite()) {
+            "Raft connect timeout must be positive and finite"
+        }
+        require(requestTimeout.isPositive() && requestTimeout.isFinite()) {
+            "Raft request timeout must be positive and finite"
+        }
+    }
+
     private val sslContext = NettyQuicSslContextFactory.client(tlsConfig)
     private val eventLoopGroup: EventLoopGroup =
         MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory())
@@ -46,14 +63,28 @@ class NettyQuicRaftRpcChannel(
         var connection: QuicChannel? = null
         var stream: QuicStreamChannel? = null
         try {
-            connection = connection(peerId)
-            stream = connection.createStream(
-                QuicStreamType.BIDIRECTIONAL,
-                ResponseHandler(codec, response),
-            ).awaitResult()
-            stream.writeAndFlush(Unpooled.wrappedBuffer(frame)).awaitCompletion()
-            stream.shutdownOutput().awaitCompletion()
-            return response.await()
+            val activeConnection = withTimeoutOrNull(connectTimeout) { connection(peerId) }
+                ?: throw RaftTransportException(
+                    "Raft RPC connection to $peerId timed out after $connectTimeout",
+                )
+            connection = activeConnection
+            val result = withTimeoutOrNull(requestTimeout) {
+                val requestStream = activeConnection.createStream(
+                    QuicStreamType.BIDIRECTIONAL,
+                    ResponseHandler(codec, response),
+                ).awaitResult()
+                stream = requestStream
+                requestStream.writeAndFlush(Unpooled.wrappedBuffer(frame)).awaitCompletion()
+                requestStream.shutdownOutput().awaitCompletion()
+                response.await()
+            }
+            if (result != null) return result
+            // A timed-out connection may still look active after its server disappears.
+            evict(peerId, activeConnection)
+            activeConnection.close().awaitCompletion()
+            throw RaftTransportException(
+                "Raft RPC request to $peerId timed out after $requestTimeout",
+            )
         } catch (cause: Throwable) {
             connection?.takeIf { !it.isActive }?.let { evict(peerId, it) }
             if (cause is CancellationException) throw cause
@@ -87,15 +118,29 @@ class NettyQuicRaftRpcChannel(
         val address = peerResolver.resolve(peerId)
         require(address.port != 0) { "Raft peer port must not be zero: $peerId" }
         val datagram = datagramChannel()
-        val connection = QuicChannel.newBootstrap(datagram)
-            .streamHandler(object : ChannelInboundHandlerAdapter() {
-                override fun channelActive(context: ChannelHandlerContext) {
-                    context.close()
-                }
-            })
-            .remoteAddress(InetSocketAddress(address.host, address.port))
-            .connect()
-            .awaitResult()
+        val pendingConnection = AtomicReference<QuicChannel>()
+        val abandoned = AtomicBoolean(false)
+        val connection = try {
+            QuicChannel.newBootstrap(datagram)
+                .handler(object : ChannelInitializer<QuicChannel>() {
+                    override fun initChannel(channel: QuicChannel) {
+                        pendingConnection.set(channel)
+                        if (abandoned.get()) channel.close()
+                    }
+                })
+                .streamHandler(object : ChannelInboundHandlerAdapter() {
+                    override fun channelActive(context: ChannelHandlerContext) {
+                        context.close()
+                    }
+                })
+                .remoteAddress(InetSocketAddress(address.host, address.port))
+                .connect()
+                .awaitResult()
+        } catch (cause: Throwable) {
+            abandoned.set(true)
+            pendingConnection.get()?.close()
+            throw cause
+        }
         try {
             verifyPeer(connection, peerId)
         } catch (cause: Throwable) {
