@@ -18,6 +18,7 @@ import net.kigawa.fortis.raft.RaftCommand
 import net.kigawa.fortis.raft.RaftStateMachine
 import net.kigawa.fortis.raft.append.AppendEntriesRequest
 import net.kigawa.fortis.raft.candidate.CandidateNode
+import net.kigawa.fortis.raft.follower.FollowerNode
 import net.kigawa.fortis.raft.leader.LeaderNode
 import net.kigawa.fortis.raft.log.MemoryRaftLog
 import net.kigawa.fortis.raft.log.RaftLogEntry
@@ -460,7 +461,84 @@ class NettyQuicRaftRpcIntegrationTest {
                 assertEquals(2L, volatileState.lastApplied)
                 assertEquals(listOf<RaftCommand>(command), stateMachine.applied)
             }
+            assertEquals(RaftReadIndex(2, 1), leader.runtime.readIndex())
+            assertEquals(command, leader.runtime.linearizableRead { (it as RecordingStateMachine).applied.single() })
             assertEquals(2, channels.getValue("node-1").connectionCreationCount)
+        } finally {
+            nodes.values.forEach { it.runtime.stop() }
+            close(channels.values, servers.values)
+        }
+    }
+
+    @Test
+    fun staleLeaderCannotReadAfterAnotherLeaderCommitsOverQuic() = runNetworkTest {
+        val authority = TestRaftCertificateAuthority.create()
+        val addresses = mutableMapOf<String, RaftPeerAddress>()
+        val tlsConfigs = NODE_IDS.associateWith { tlsConfig(authority, it) }
+        val channels = NODE_IDS.associateWith {
+            NettyQuicRaftRpcChannel(resolver(addresses), tlsConfigs.getValue(it))
+        }
+        val nodes = NODE_IDS.associateWith { node(it, RpcRaftTransport(channels.getValue(it))) }
+        val servers = NODE_IDS.associateWith { server(nodes.getValue(it), tlsConfigs.getValue(it)) }
+        try {
+            startServers(servers, addresses)
+            val old = nodes.getValue("node-1")
+            old.runtime.onElectionTimeout()
+            val before = RaftCommand.Put(byteArrayOf(1), byteArrayOf(10))
+            old.runtime.propose(before)
+            old.runtime.onHeartbeatTimeout()
+            assertEquals(before, old.runtime.linearizableRead { (it as RecordingStateMachine).applied.last() })
+
+            // Isolate the old leader from incoming election and replication messages.
+            servers.getValue("node-1").stop()
+            val next = nodes.getValue("node-2")
+            next.runtime.onElectionTimeout()
+            assertIs<LeaderNode>(next.runtime.currentNode)
+            val after = RaftCommand.Put(byteArrayOf(1), byteArrayOf(20))
+            next.runtime.propose(after)
+            assertEquals(after, next.runtime.linearizableRead { (it as RecordingStateMachine).applied.last() })
+            assertEquals(before, old.stateMachine.applied.last())
+            assertTrue(assertIs<LeaderNode>(old.runtime.currentNode).isReady)
+
+            var called = false
+            assertFailsWith<RaftReadLeadershipLostException> {
+                old.runtime.linearizableRead { called = true; (it as RecordingStateMachine).applied.last() }
+            }
+            assertFalse(called)
+            assertIs<FollowerNode>(old.runtime.currentNode)
+            assertEquals(2L, old.runtime.currentNode.persistentState.currentTerm)
+        } finally {
+            nodes.values.forEach { it.runtime.stop() }
+            close(channels.values, servers.values)
+        }
+    }
+
+    @Test
+    fun quorumLossTimesOutReadOverQuicDespitePreviouslyCommittedValue() = runNetworkTest {
+        val authority = TestRaftCertificateAuthority.create()
+        val addresses = mutableMapOf<String, RaftPeerAddress>()
+        val tlsConfigs = NODE_IDS.associateWith { tlsConfig(authority, it) }
+        val channels = NODE_IDS.associateWith {
+            NettyQuicRaftRpcChannel(resolver(addresses), tlsConfigs.getValue(it))
+        }
+        val nodes = NODE_IDS.associateWith { node(it, RpcRaftTransport(channels.getValue(it))) }
+        val servers = NODE_IDS.associateWith { server(nodes.getValue(it), tlsConfigs.getValue(it)) }
+        try {
+            startServers(servers, addresses)
+            val leader = nodes.getValue("node-1")
+            leader.runtime.onElectionTimeout()
+            val command = RaftCommand.Put(byteArrayOf(1), byteArrayOf(10))
+            leader.runtime.propose(command)
+            assertEquals(RaftReadIndex(2, 1), leader.runtime.readIndex())
+            servers.getValue("node-2").stop()
+            servers.getValue("node-3").stop()
+            var called = false
+            assertFailsWith<TimeoutCancellationException> {
+                leader.runtime.linearizableRead(500.milliseconds) { called = true }
+            }
+            assertFalse(called)
+            assertTrue(assertIs<LeaderNode>(leader.runtime.currentNode).isReady)
+            assertEquals(listOf<RaftCommand>(command), leader.stateMachine.applied)
         } finally {
             nodes.values.forEach { it.runtime.stop() }
             close(channels.values, servers.values)

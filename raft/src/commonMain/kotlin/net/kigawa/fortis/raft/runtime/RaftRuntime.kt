@@ -15,6 +15,7 @@ import kotlin.coroutines.CoroutineContext
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 import net.kigawa.fortis.raft.RaftCommand
+import net.kigawa.fortis.raft.RaftStateMachine
 import net.kigawa.fortis.raft.append.AppendEntriesRequest
 import net.kigawa.fortis.raft.append.AppendEntriesResponse
 import net.kigawa.fortis.raft.candidate.CandidateNode
@@ -40,6 +41,7 @@ class RaftRuntime(
     private val proposalJob = SupervisorJob(proposalCoroutineContext[Job])
     private val proposalScope = CoroutineScope(proposalCoroutineContext + proposalJob)
     private val proposals = mutableMapOf<Long, PendingProposal>()
+    private val reads = mutableSetOf<ReadIndexRequestContext>()
 
     val currentNode: RaftNode
         get() = node
@@ -53,6 +55,8 @@ class RaftRuntime(
         mutex.withLock {
             proposals.values.forEach { it.completion.completeExceptionally(RaftProposalStoppedException()) }
             proposals.clear()
+            reads.forEach { it.completion.completeExceptionally(RaftReadStoppedException()) }
+            reads.clear()
         }
         node.timer.cancel()
     }
@@ -62,7 +66,7 @@ class RaftRuntime(
     ): RequestVoteResponse = mutex.withLock {
         val result = node.handleRequestVote(request)
         node = result.node
-        settleProposals()
+        settlePending()
         result.value
     }
 
@@ -71,7 +75,7 @@ class RaftRuntime(
     ): AppendEntriesResponse = mutex.withLock {
         val result = node.handleAppendEntries(request)
         node = result.node
-        settleProposals()
+        settlePending()
         result.value
     }
 
@@ -83,7 +87,7 @@ class RaftRuntime(
                 else -> return
             }
             node = result.node
-            settleProposals()
+            settlePending()
             val candidate = node as? CandidateNode ?: return
             ElectionRound(candidate, result.value, node.peerIds.toList())
         }
@@ -107,7 +111,7 @@ class RaftRuntime(
                 if (observeHigherTerm(response.term)) return@stateLock
                 if (!isCurrentElection(election)) return@stateLock
                 node = election.candidate.handleRequestVoteResponse(peerId, response)
-                settleProposals()
+                settlePending()
             }
         }
     }
@@ -155,7 +159,7 @@ class RaftRuntime(
                         val entry = leader.appendCommand(command)
                         val round = leaderRound(leader)
                         if (completion.isActive) proposals[entry.index] = PendingProposal(round, entry, completion)
-                        settleProposals()
+                        settlePending()
                         round
                     }
                     replicateRound(round)
@@ -178,6 +182,78 @@ class RaftRuntime(
                         proposals.entries.removeAll { it.value.completion === completion }
                     }
                 }
+            }
+        }
+    }
+
+    /**
+     * Confirms leadership using fresh, request-correlated RPCs and waits for local apply.
+     * A current-term commit is required first; replication establishes it when necessary.
+     * This is a barrier, not a reusable lease. Use [linearizableRead] to read local state.
+     * Timeout/cancellation ends the wait and cancels its confirmation RPCs.
+     */
+    suspend fun readIndex(timeout: Duration = 5.seconds): RaftReadIndex {
+        require(timeout.isPositive() && timeout.isFinite()) { "Read timeout must be positive and finite" }
+        return withTimeout(timeout) {
+            val completion = CompletableDeferred<RaftReadIndex>()
+            val waiterJob = currentCoroutineContext()[Job]
+            val probeJob = SupervisorJob(proposalJob)
+            val submission = proposalScope.launch {
+                try {
+                    val initialReplication = mutex.withLock {
+                        if (!completion.isActive || waiterJob?.isActive == false) return@launch
+                        if (!proposalJob.isActive) throw RaftReadStoppedException()
+                        val leader = node as? LeaderNode ?: throw RaftReadNotLeaderException()
+                        val round = leaderRound(leader)
+                        reads.add(ReadIndexRequestContext(round, completion, probeJob))
+                        settleReads()
+                        if (leader.isReady) null else round
+                    }
+                    // This belongs to the runtime: cancelling a read must not interrupt apply.
+                    if (initialReplication != null) replicateRound(initialReplication)
+                } catch (cause: Throwable) {
+                    completion.completeExceptionally(
+                        if (!proposalJob.isActive) RaftReadStoppedException() else cause,
+                    )
+                }
+            }
+            submission.invokeOnCompletion { cause ->
+                if (cause != null) completion.completeExceptionally(RaftReadStoppedException())
+            }
+            try {
+                completion.await()
+            } finally {
+                completion.cancel()
+                probeJob.cancel()
+                proposalScope.launch {
+                    mutex.withLock { reads.removeAll { it.completion === completion } }
+                }
+            }
+        }
+    }
+
+    /**
+     * Reads applied state after a fresh quorum check, rechecking role/term under the state lock.
+     * The callback runs under that lock and must only read state, without re-entering this runtime.
+     * The timeout covers readiness, quorum confirmation, apply, and the callback.
+     */
+    suspend fun <T> linearizableRead(
+        timeout: Duration = 5.seconds,
+        read: suspend (RaftStateMachine) -> T,
+    ): T {
+        require(timeout.isPositive() && timeout.isFinite()) { "Read timeout must be positive and finite" }
+        return withTimeout(timeout) {
+            val barrier = readIndex(timeout)
+            mutex.withLock {
+                if (!proposalJob.isActive) throw RaftReadStoppedException()
+                val leader = node as? LeaderNode ?: throw RaftReadLeadershipLostException(barrier.term)
+                if (leader.persistentState.currentTerm != barrier.term) {
+                    throw RaftReadLeadershipLostException(barrier.term)
+                }
+                check(leader.volatileState.lastApplied >= barrier.index) { "Read barrier is not applied" }
+                val result = read(leader.stateMachine)
+                if (!proposalJob.isActive) throw RaftReadStoppedException()
+                result
             }
         }
     }
@@ -227,7 +303,7 @@ class RaftRuntime(
                 }
                 appendAttempts.remove(peerId)
                 node = round.leader.handleAppendEntriesResponse(peerId, attempt.request, response)
-                settleProposals()
+                settlePending()
                 !response.success && isCurrentLeader(round)
             }
             if (!retry) return
@@ -254,9 +330,14 @@ class RaftRuntime(
         node.persistentState.votedFor = null
         node = node.follower()
         appendAttempts.clear()
-        settleProposals()
+        settlePending()
         node.timer.reset(RaftTimeoutEvent.Election)
         return true
+    }
+
+    private fun settlePending() {
+        settleProposals()
+        settleReads()
     }
 
     private fun settleProposals() {
@@ -282,6 +363,81 @@ class RaftRuntime(
                 }
             }
         }
+    }
+
+    private fun settleReads() {
+        val iterator = reads.iterator()
+        while (iterator.hasNext()) {
+            val read = iterator.next()
+            when {
+                !read.completion.isActive -> iterator.remove()
+                !proposalJob.isActive -> {
+                    read.completion.completeExceptionally(RaftReadStoppedException())
+                    iterator.remove()
+                }
+                !isCurrentLeader(read.round) -> {
+                    read.completion.completeExceptionally(RaftReadLeadershipLostException(read.round.term))
+                    iterator.remove()
+                }
+                else -> {
+                    if (read.index == null && read.round.leader.isReady) {
+                        // Snapshot before sending probes; older RPCs cannot satisfy this context.
+                        read.index = node.volatileState.commitIndex
+                        val scope = CoroutineScope(proposalScope.coroutineContext + read.probeJob)
+                        for (peerId in read.round.peerIds) {
+                            scope.launch {
+                                try {
+                                    confirmRead(read, peerId)
+                                } catch (cause: Throwable) {
+                                    if (read.probeJob.isActive) read.completion.completeExceptionally(cause)
+                                }
+                            }
+                        }
+                    }
+                    val index = read.index
+                    if (index != null &&
+                        read.confirmedPeers.size >= (read.round.peerIds.size + 1) / 2 + 1 &&
+                        node.volatileState.lastApplied >= index
+                    ) {
+                        read.completion.complete(RaftReadIndex(index, read.round.term))
+                        iterator.remove()
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun confirmRead(read: ReadIndexRequestContext, peerId: String) {
+        peerRpcMutexes.getValue(peerId).withLock peerLock@{
+            val request = mutex.withLock {
+                if (!read.completion.isActive || !isCurrentLeader(read.round)) return@peerLock
+                // A term-only heartbeat: never changes peer progress, logs, or commitIndex.
+                // The RPC's response is correlated to this context by the transport call/stream.
+                AppendEntriesRequest(read.round.term, node.nodeId, 0, 0, emptyList(), 0)
+            }
+            val response = try {
+                transport.appendEntries(peerId, request)
+            } catch (_: RaftTransportException) {
+                return@peerLock
+            }
+            mutex.withLock stateLock@{
+                if (observeHigherTerm(response.term)) return@stateLock
+                if (!read.completion.isActive || !isCurrentLeader(read.round)) return@stateLock
+                if (response.term == read.round.term && response.success) {
+                    read.confirmedPeers.add(peerId)
+                    settleReads()
+                }
+            }
+        }
+    }
+
+    private class ReadIndexRequestContext(
+        val round: LeaderRound,
+        val completion: CompletableDeferred<RaftReadIndex>,
+        val probeJob: Job,
+    ) {
+        var index: Long? = null
+        val confirmedPeers = mutableSetOf(round.leader.nodeId)
     }
 
     private data class PendingProposal(
