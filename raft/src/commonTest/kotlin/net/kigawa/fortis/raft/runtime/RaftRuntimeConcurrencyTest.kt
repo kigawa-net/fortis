@@ -2,6 +2,7 @@ package net.kigawa.fortis.raft.runtime
 
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import net.kigawa.fortis.raft.MemoryRaftPersistentStateStore
 import net.kigawa.fortis.raft.RaftCommand
@@ -25,7 +26,94 @@ import kotlin.test.assertIs
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.seconds
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class RaftRuntimeConcurrencyTest {
+    @Test
+    fun healthyMajorityElectsLeaderBeforeDelayedPeerResponds() = runTest {
+        val transport = ControlledTransport()
+        val fixture = fixture(transport, peerIds = setOf("node-2", "node-3"))
+        val election = launch { fixture.runtime.onElectionTimeout() }
+        val pending = List(2) { transport.votes.receive() }.associateBy { it.peerId }
+        pending.getValue("node-3").response.complete(RequestVoteResponse(1, true))
+        runCurrent()
+        assertIs<LeaderNode>(fixture.runtime.currentNode)
+        assertTrue(election.isActive)
+        pending.getValue("node-2").response.complete(RequestVoteResponse(1, false))
+        election.join()
+    }
+
+    @Test
+    fun delayedHigherTermVoteResponseDemotesNewlyElectedLeader() = runTest {
+        val transport = ControlledTransport()
+        val fixture = fixture(transport, peerIds = setOf("node-2", "node-3"))
+        val election = launch { fixture.runtime.onElectionTimeout() }
+        val pending = List(2) { transport.votes.receive() }.associateBy { it.peerId }
+        pending.getValue("node-3").response.complete(RequestVoteResponse(1, true))
+        runCurrent()
+        assertIs<LeaderNode>(fixture.runtime.currentNode)
+        pending.getValue("node-2").response.complete(RequestVoteResponse(4, false))
+        election.join()
+        assertIs<FollowerNode>(fixture.runtime.currentNode)
+        assertEquals(4L, fixture.store.load().currentTerm)
+        assertEquals(null, fixture.store.load().votedFor)
+    }
+
+    @Test
+    fun healthyMajorityCommitsAndAppliesBeforeDelayedPeerResponds() = runTest {
+        val transport = ControlledTransport()
+        val fixture = fixture(transport, peerIds = setOf("node-2", "node-3"))
+        elect(fixture.runtime, transport)
+        val append = async { fixture.runtime.appendCommand(command(1)) }
+        val pending = List(2) { transport.appends.receive() }.associateBy { it.peerId }
+        pending.getValue("node-3").response.complete(AppendEntriesResponse(1, true))
+        runCurrent()
+        assertEquals(1L, fixture.state.commitIndex)
+        assertEquals(listOf(command(1)), fixture.applied)
+        assertTrue(append.isActive)
+        pending.getValue("node-2").response.complete(AppendEntriesResponse(1, true))
+        append.await()
+    }
+
+    @Test
+    fun overlappingCommandsSerializeRpcAndUseUpdatedPeerProgress() = runTest {
+        val transport = ControlledTransport()
+        val fixture = fixture(transport)
+        elect(fixture.runtime, transport)
+        val first = async { fixture.runtime.appendCommand(command(1)) }
+        val initial = transport.appends.receive()
+        val second = async { fixture.runtime.appendCommand(command(2)) }
+        runCurrent()
+        assertEquals(2L, fixture.runtime.currentNode.log.lastIndex())
+        assertTrue(transport.appends.tryReceive().isFailure)
+        initial.response.complete(AppendEntriesResponse(1, true))
+        val next = transport.appends.receive()
+        assertEquals(1L, next.request.prevLogIndex)
+        assertEquals(listOf(command(2)), next.request.entries.map { it.command })
+        next.response.complete(AppendEntriesResponse(1, true))
+        first.await()
+        second.await()
+        assertEquals(1, transport.maximumInFlight.getValue("node-2"))
+        assertEquals(2L, fixture.state.commitIndex)
+        assertEquals(listOf(command(1), command(2)), fixture.applied)
+    }
+
+    @Test
+    fun cancellationReleasesPeerRpcLockForNextCommand() = runTest {
+        val transport = ControlledTransport()
+        val fixture = fixture(transport)
+        elect(fixture.runtime, transport)
+        val first = launch { fixture.runtime.appendCommand(command(1)) }
+        transport.appends.receive()
+        first.cancelAndJoin()
+        assertEquals(0, transport.inFlight.getValue("node-2"))
+        val next = async { fixture.runtime.appendCommand(command(2)) }
+        val pending = transport.appends.receive()
+        pending.response.complete(AppendEntriesResponse(1, true))
+        next.await()
+        assertEquals(1, transport.maximumInFlight.getValue("node-2"))
+        assertEquals(listOf(command(1), command(2)), fixture.applied)
+    }
+
     @Test
     fun simultaneousElectionsDoNotWaitForEachOthersStateLocks() = runTest {
         val local = LocalRaftTransport()
@@ -60,11 +148,11 @@ class RaftRuntimeConcurrencyTest {
         val transport = ControlledTransport()
         val fixture = fixture(transport, peerIds = setOf("node-2", "node-3"))
         val election = launch { fixture.runtime.onElectionTimeout() }
-        val pending = transport.votes.receive()
+        val pending = List(2) { transport.votes.receive() }
         withTimeout(1.seconds) {
             assertTrue(fixture.runtime.handleRequestVote(vote(term = 2).copy(candidateId = "node-3")).voteGranted)
         }
-        pending.response.complete(RequestVoteResponse(1, true))
+        pending.forEach { it.response.complete(RequestVoteResponse(1, true)) }
         election.join()
         assertIs<FollowerNode>(fixture.runtime.currentNode)
         assertEquals(2L, fixture.store.load().currentTerm)
@@ -78,13 +166,16 @@ class RaftRuntimeConcurrencyTest {
         val firstElection = launch { fixture.runtime.onElectionTimeout() }
         val first = transport.votes.receive()
         val secondElection = launch { fixture.runtime.onElectionTimeout() }
-        val second = transport.votes.receive()
+        runCurrent()
+        assertTrue(transport.votes.tryReceive().isFailure)
         assertEquals(1L, first.request.term)
-        assertEquals(2L, second.request.term)
+        assertEquals(2L, fixture.store.load().currentTerm)
         // Even a response carrying the new term cannot count toward a newer election.
         first.response.complete(RequestVoteResponse(2, true))
         firstElection.join()
         assertIs<CandidateNode>(fixture.runtime.currentNode)
+        val second = transport.votes.receive()
+        assertEquals(2L, second.request.term)
         second.response.complete(RequestVoteResponse(2, true))
         secondElection.join()
         assertIs<LeaderNode>(fixture.runtime.currentNode)
@@ -136,17 +227,23 @@ class RaftRuntimeConcurrencyTest {
     }
 
     @Test
-    fun staleAppendFailureCannotRollBackProgressFromNewerSuccess() = runTest {
+    fun failedAppendRetriesBeforeQueuedReplicationWithoutRollingBackProgress() = runTest {
         val transport = ControlledTransport()
         val fixture = fixture(transport)
         elect(fixture.runtime, transport)
         val first = async { fixture.runtime.appendCommand(command(1)) }
         val older = transport.appends.receive()
         val second = async { fixture.runtime.appendCommand(command(2)) }
-        val newer = transport.appends.receive()
-        newer.response.complete(AppendEntriesResponse(1, true))
-        second.await()
+        runCurrent()
+        assertTrue(transport.appends.tryReceive().isFailure)
         older.response.complete(AppendEntriesResponse(1, false))
+        val retry = transport.appends.receive()
+        assertEquals(listOf(command(1), command(2)), retry.request.entries.map { it.command })
+        retry.response.complete(AppendEntriesResponse(1, true))
+        val queued = transport.appends.receive()
+        assertEquals(2L, queued.request.prevLogIndex)
+        queued.response.complete(AppendEntriesResponse(1, true))
+        second.await()
         first.await()
         val progress = assertIs<LeaderNode>(fixture.runtime.currentNode).peerProgress.getValue("node-2")
         assertEquals(3L, progress.nextIndex)
@@ -154,6 +251,7 @@ class RaftRuntimeConcurrencyTest {
         assertEquals(2L, fixture.state.commitIndex)
         assertEquals(listOf(command(1), command(2)), fixture.applied)
         assertTrue(transport.appends.tryReceive().isFailure)
+        assertEquals(1, transport.maximumInFlight.getValue("node-2"))
     }
 
     @Test
@@ -173,16 +271,21 @@ class RaftRuntimeConcurrencyTest {
     @Test
     fun staleHigherTermAppendResponseStillDemotesLeader() = runTest {
         val transport = ControlledTransport()
-        val fixture = fixture(transport)
+        val fixture = fixture(transport, peerIds = setOf("node-2", "node-3"))
         elect(fixture.runtime, transport)
         val first = async { fixture.runtime.appendCommand(command(1)) }
-        val older = transport.appends.receive()
+        val pending = List(2) { transport.appends.receive() }.associateBy { it.peerId }
+        pending.getValue("node-3").response.complete(AppendEntriesResponse(1, true))
+        runCurrent()
         val second = async { fixture.runtime.appendCommand(command(2)) }
         val newer = transport.appends.receive()
+        assertEquals("node-3", newer.peerId)
         newer.response.complete(AppendEntriesResponse(1, true))
-        second.await()
-        older.response.complete(AppendEntriesResponse(3, false))
+        runCurrent()
+        assertEquals(2L, fixture.state.commitIndex)
+        pending.getValue("node-2").response.complete(AppendEntriesResponse(3, false))
         first.await()
+        second.await()
         assertIs<FollowerNode>(fixture.runtime.currentNode)
         assertEquals(3L, fixture.store.load().currentTerm)
         assertEquals(null, fixture.store.load().votedFor)
@@ -192,27 +295,45 @@ class RaftRuntimeConcurrencyTest {
 
     @Test
     fun previousLeaderAppendCannotUpdateProgressAfterReelection() = runTest {
+        previousLeaderAppendAfterReelection(success = true)
+    }
+
+    @Test
+    fun previousLeaderAppendFailureCannotRollBackProgressAfterReelection() = runTest {
+        previousLeaderAppendAfterReelection(success = false)
+    }
+
+    private suspend fun CoroutineScope.previousLeaderAppendAfterReelection(success: Boolean) {
         val transport = ControlledTransport()
-        val fixture = fixture(transport)
+        val fixture = fixture(transport, peerIds = setOf("node-2", "node-3"))
         elect(fixture.runtime, transport)
         val append = async { fixture.runtime.appendCommand(command(1)) }
-        val pending = transport.appends.receive()
+        val pending = List(2) { transport.appends.receive() }.associateBy { it.peerId }
+        pending.getValue("node-3").response.complete(AppendEntriesResponse(0, true))
         fixture.runtime.handleAppendEntries(heartbeat(term = 1))
-        elect(fixture.runtime, transport)
+        val election = launch { fixture.runtime.onElectionTimeout() }
+        val vote = transport.votes.receive()
+        assertEquals("node-3", vote.peerId)
+        vote.response.complete(RequestVoteResponse(2, true))
+        // Only the test scheduler is used here, so yield until the election applies its response.
+        yield()
         assertEquals(2L, fixture.store.load().currentTerm)
         val leader = assertIs<LeaderNode>(fixture.runtime.currentNode)
         val progress = leader.peerProgress.getValue("node-2")
-        pending.response.complete(AppendEntriesResponse(2, true))
+        pending.getValue("node-2").response.complete(AppendEntriesResponse(2, success))
         append.await()
+        election.join()
         assertEquals(progress, leader.peerProgress.getValue("node-2"))
         assertEquals(0L, fixture.state.commitIndex)
     }
 
-    private suspend fun CoroutineScope.elect(runtime: RaftRuntime, transport: ControlledTransport) {
-        val election = launch { runtime.onElectionTimeout() }
-        val pending = transport.votes.receive()
-        pending.response.complete(RequestVoteResponse(pending.request.term, true))
-        election.join()
+    private suspend fun elect(runtime: RaftRuntime, transport: ControlledTransport) {
+        transport.automaticVotes = true
+        try {
+            runtime.onElectionTimeout()
+        } finally {
+            transport.automaticVotes = false
+        }
         assertIs<LeaderNode>(runtime.currentNode)
     }
 
@@ -245,26 +366,43 @@ class RaftRuntimeConcurrencyTest {
     private class ControlledTransport : RaftTransport {
         val votes = Channel<PendingVote>(Channel.UNLIMITED)
         val appends = Channel<PendingAppend>(Channel.UNLIMITED)
+        var automaticVotes = false
+        val inFlight = mutableMapOf<String, Int>()
+        val maximumInFlight = mutableMapOf<String, Int>()
 
-        override suspend fun requestVote(peerId: String, request: RequestVoteRequest): RequestVoteResponse {
-            val pending = PendingVote(request)
+        override suspend fun requestVote(peerId: String, request: RequestVoteRequest): RequestVoteResponse = rpc(peerId) {
+            if (automaticVotes) return@rpc RequestVoteResponse(request.term, true)
+            val pending = PendingVote(peerId, request)
             votes.send(pending)
-            return pending.response.await()
+            pending.response.await()
         }
 
-        override suspend fun appendEntries(peerId: String, request: AppendEntriesRequest): AppendEntriesResponse {
-            val pending = PendingAppend(request)
+        override suspend fun appendEntries(peerId: String, request: AppendEntriesRequest): AppendEntriesResponse = rpc(peerId) {
+            val pending = PendingAppend(peerId, request)
             appends.send(pending)
-            return pending.response.await()
+            pending.response.await()
+        }
+
+        private suspend fun <T> rpc(peerId: String, block: suspend () -> T): T {
+            val active = inFlight.getOrElse(peerId) { 0 } + 1
+            inFlight[peerId] = active
+            maximumInFlight[peerId] = maxOf(maximumInFlight.getOrElse(peerId) { 0 }, active)
+            try {
+                return block()
+            } finally {
+                inFlight[peerId] = inFlight.getValue(peerId) - 1
+            }
         }
     }
 
     private data class PendingVote(
+        val peerId: String,
         val request: RequestVoteRequest,
         val response: CompletableDeferred<RequestVoteResponse> = CompletableDeferred(),
     )
 
     private data class PendingAppend(
+        val peerId: String,
         val request: AppendEntriesRequest,
         val response: CompletableDeferred<AppendEntriesResponse> = CompletableDeferred(),
     )

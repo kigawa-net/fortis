@@ -1,5 +1,7 @@
 package net.kigawa.fortis.raft.runtime
 
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import net.kigawa.fortis.raft.RaftCommand
@@ -21,6 +23,7 @@ class RaftRuntime(
     private val transport: RaftTransport,
 ) {
     private val mutex = Mutex()
+    private val peerRpcMutexes = initialNode.peerIds.associateWith { Mutex() }
     private var node: RaftNode = initialNode
     private val appendAttempts = mutableMapOf<String, AppendAttempt>()
 
@@ -63,16 +66,24 @@ class RaftRuntime(
             ElectionRound(candidate, result.value, node.peerIds.toList())
         }
 
-        for (peerId in election.peerIds) {
-            if (!mutex.withLock { isCurrentElection(election) }) return
+        coroutineScope {
+            for (peerId in election.peerIds) {
+                launch { requestVote(election, peerId) }
+            }
+        }
+    }
+
+    private suspend fun requestVote(election: ElectionRound, peerId: String) {
+        peerRpcMutexes.getValue(peerId).withLock peerLock@{
+            if (!mutex.withLock { isCurrentElection(election) }) return@peerLock
             val response = try {
                 transport.requestVote(peerId, election.request)
             } catch (_: RaftTransportException) {
-                continue
+                return@peerLock
             }
-            mutex.withLock {
-                if (observeHigherTerm(response.term)) return@withLock
-                if (!isCurrentElection(election)) return@withLock
+            mutex.withLock stateLock@{
+                if (observeHigherTerm(response.term)) return@stateLock
+                if (!isCurrentElection(election)) return@stateLock
                 node = election.candidate.handleRequestVoteResponse(peerId, response)
             }
         }
@@ -107,9 +118,13 @@ class RaftRuntime(
         replicateRound(round)
     }
 
-    private suspend fun replicateRound(round: LeaderRound) {
+    private suspend fun replicateRound(round: LeaderRound) = coroutineScope {
         for (peerId in round.peerIds) {
-            replicatePeer(round, peerId)
+            launch {
+                peerRpcMutexes.getValue(peerId).withLock {
+                    replicatePeer(round, peerId)
+                }
+            }
         }
     }
 

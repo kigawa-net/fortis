@@ -53,6 +53,7 @@ class NettyQuicRaftRpcChannel(
         MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory())
     private val mutex = Mutex()
     private val connections = mutableMapOf<String, QuicChannel>()
+    private val connectionMutexes = mutableMapOf<String, Mutex>()
     private var datagramChannel: Channel? = null
     private var closed = false
     internal var connectionCreationCount: Int = 0
@@ -101,6 +102,7 @@ class NettyQuicRaftRpcChannel(
             closed = true
             val currentConnections = connections.values.toList()
             connections.clear()
+            connectionMutexes.clear()
             val currentDatagramChannel = datagramChannel
             datagramChannel = null
             currentConnections to currentDatagramChannel
@@ -110,46 +112,51 @@ class NettyQuicRaftRpcChannel(
         eventLoopGroup.shutdownGracefully().awaitCompletion()
     }
 
-    private suspend fun connection(peerId: String): QuicChannel = mutex.withLock {
-        check(!closed) { "Raft RPC channel is closed" }
-        connections[peerId]?.takeIf { it.isActive }?.let { return it }
-        connections.remove(peerId)?.close()
-
-        val address = peerResolver.resolve(peerId)
-        require(address.port != 0) { "Raft peer port must not be zero: $peerId" }
-        val datagram = datagramChannel()
-        val pendingConnection = AtomicReference<QuicChannel>()
-        val abandoned = AtomicBoolean(false)
-        val connection = try {
-            QuicChannel.newBootstrap(datagram)
-                .handler(object : ChannelInitializer<QuicChannel>() {
-                    override fun initChannel(channel: QuicChannel) {
-                        pendingConnection.set(channel)
-                        if (abandoned.get()) channel.close()
-                    }
-                })
-                .streamHandler(object : ChannelInboundHandlerAdapter() {
-                    override fun channelActive(context: ChannelHandlerContext) {
-                        context.close()
-                    }
-                })
-                .remoteAddress(InetSocketAddress(address.host, address.port))
-                .connect()
-                .awaitResult()
-        } catch (cause: Throwable) {
-            abandoned.set(true)
-            pendingConnection.get()?.close()
-            throw cause
+    private suspend fun connection(peerId: String): QuicChannel {
+        val connectionMutex = mutex.withLock {
+            check(!closed) { "Raft RPC channel is closed" }
+            connectionMutexes.getOrPut(peerId) { Mutex() }
         }
-        try {
-            verifyPeer(connection, peerId)
-        } catch (cause: Throwable) {
-            connection.close().awaitCompletion()
-            throw cause
+        return connectionMutex.withLock {
+            val datagram = mutex.withLock {
+                check(!closed) { "Raft RPC channel is closed" }
+                connections[peerId]?.takeIf { it.isActive }?.let { return it }
+                connections.remove(peerId)?.close()
+                datagramChannel()
+            }
+            val address = peerResolver.resolve(peerId)
+            require(address.port != 0) { "Raft peer port must not be zero: $peerId" }
+            val pendingConnection = AtomicReference<QuicChannel>()
+            val abandoned = AtomicBoolean(false)
+            try {
+                val connection = QuicChannel.newBootstrap(datagram)
+                    .handler(object : ChannelInitializer<QuicChannel>() {
+                        override fun initChannel(channel: QuicChannel) {
+                            pendingConnection.set(channel)
+                            if (abandoned.get()) channel.close()
+                        }
+                    })
+                    .streamHandler(object : ChannelInboundHandlerAdapter() {
+                        override fun channelActive(context: ChannelHandlerContext) {
+                            context.close()
+                        }
+                    })
+                    .remoteAddress(InetSocketAddress(address.host, address.port))
+                    .connect()
+                    .awaitResult()
+                verifyPeer(connection, peerId)
+                mutex.withLock {
+                    check(!closed) { "Raft RPC channel is closed" }
+                    connectionCreationCount++
+                    connections[peerId] = connection
+                }
+                connection
+            } catch (cause: Throwable) {
+                abandoned.set(true)
+                pendingConnection.get()?.close()
+                throw cause
+            }
         }
-        connectionCreationCount++
-        connections[peerId] = connection
-        connection
     }
 
     private suspend fun datagramChannel(): Channel {

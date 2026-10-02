@@ -6,6 +6,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.delay
 import java.net.DatagramSocket
 import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicInteger
@@ -46,6 +47,57 @@ import kotlin.time.Duration.Companion.seconds
 
 class NettyQuicRaftRpcIntegrationTest {
     @Test
+    fun healthyQuicPeerElectsAndCommitsWhileAnotherPeerIsConnecting() = runNetworkTest {
+        val authority = TestRaftCertificateAuthority.create()
+        val addresses = mutableMapOf<String, RaftPeerAddress>()
+        val connecting = CompletableDeferred<Unit>()
+        val channel = NettyQuicRaftRpcChannel(
+            { peerId ->
+                if (peerId == "node-2") connecting.complete(Unit)
+                addresses.getValue(peerId)
+            },
+            tlsConfig(authority, "node-1"),
+            connectTimeout = 2.seconds,
+        )
+        val transport = RpcRaftTransport(channel)
+        val leader = node("node-1", transport)
+        val healthy = node("node-3", transport)
+        val server = server(healthy, tlsConfig(authority, "node-3"))
+        try {
+            server.start()
+            addresses["node-3"] = server.boundAddress
+            // Warm up the healthy connection so this measures contention during the other handshake.
+            assertTrue(transport.requestVote("node-3", voteRequest("node-1")).voteGranted)
+            val blackhole = withContext(Dispatchers.IO) {
+                DatagramSocket(InetSocketAddress("127.0.0.1", 0))
+            }
+            blackhole.use {
+                addresses["node-2"] = RaftPeerAddress("127.0.0.1", it.localPort)
+                val election = async { leader.runtime.onElectionTimeout() }
+                withTimeout(1.seconds) { connecting.await() }
+                withTimeout(500.milliseconds) {
+                    while (leader.runtime.currentNode !is LeaderNode) delay(10.milliseconds)
+                }
+                assertTrue(election.isActive)
+                val command = RaftCommand.Put(byteArrayOf(1), byteArrayOf(10))
+                val append = async { leader.runtime.appendCommand(command) }
+                withTimeout(500.milliseconds) {
+                    while (leader.volatileState.lastApplied != 1L) delay(10.milliseconds)
+                }
+                assertEquals(1L, leader.volatileState.commitIndex)
+                assertEquals(listOf<RaftCommand>(command), leader.stateMachine.applied)
+                assertEquals(command, healthy.log.get(1)?.command)
+                assertTrue(election.isActive)
+                election.await()
+                append.await()
+                assertEquals(1, channel.connectionCreationCount)
+            }
+        } finally {
+            close(listOf(channel), listOf(server))
+        }
+    }
+
+    @Test
     fun simultaneousElectionsReceiveVoteResponsesOverQuicWithoutMutualWaiting() = runNetworkTest {
         val authority = TestRaftCertificateAuthority.create()
         val nodeIds = setOf("node-1", "node-2")
@@ -75,9 +127,9 @@ class NettyQuicRaftRpcIntegrationTest {
                 nodes.values.map { async { it.runtime.onElectionTimeout() } }.awaitAll()
             }
             assertEquals(2, completed.get())
-            for (fixture in nodes.values) {
-                assertIs<CandidateNode>(fixture.runtime.currentNode)
-                assertEquals(1L, fixture.runtime.currentNode.persistentState.currentTerm)
+            for ((runtime) in nodes.values) {
+                assertIs<CandidateNode>(runtime.currentNode)
+                assertEquals(1L, runtime.currentNode.persistentState.currentTerm)
             }
         } finally {
             close(channels.values, servers.values)
@@ -387,11 +439,11 @@ class NettyQuicRaftRpcIntegrationTest {
             leader.runtime.appendCommand(command)
             leader.runtime.onHeartbeatTimeout()
 
-            for (fixture in nodes.values) {
-                assertEquals(command, fixture.log.get(1)?.command)
-                assertEquals(1L, fixture.volatileState.commitIndex)
-                assertEquals(1L, fixture.volatileState.lastApplied)
-                assertEquals(listOf<RaftCommand>(command), fixture.stateMachine.applied)
+            for ((_, volatileState, log, stateMachine) in nodes.values) {
+                assertEquals(command, log.get(1)?.command)
+                assertEquals(1L, volatileState.commitIndex)
+                assertEquals(1L, volatileState.lastApplied)
+                assertEquals(listOf<RaftCommand>(command), stateMachine.applied)
             }
             assertEquals(2, channels.getValue("node-1").connectionCreationCount)
         } finally {
