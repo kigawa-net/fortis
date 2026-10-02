@@ -22,6 +22,7 @@ class RaftRuntime(
 ) {
     private val mutex = Mutex()
     private var node: RaftNode = initialNode
+    private val appendAttempts = mutableMapOf<String, AppendAttempt>()
 
     val currentNode: RaftNode
         get() = node
@@ -50,75 +51,139 @@ class RaftRuntime(
         result.value
     }
 
-    suspend fun onElectionTimeout(): Unit = mutex.withLock {
-        val result = when (val current = node) {
-            is FollowerNode -> current.onElectionTimeout()
-            is CandidateNode -> current.onElectionTimeout()
-            is LeaderNode -> return@withLock
-            else -> return@withLock
+    suspend fun onElectionTimeout() {
+        val election = mutex.withLock {
+            val result = when (val current = node) {
+                is FollowerNode -> current.onElectionTimeout()
+                is CandidateNode -> current.onElectionTimeout()
+                else -> return
+            }
+            node = result.node
+            val candidate = node as? CandidateNode ?: return
+            ElectionRound(candidate, result.value, node.peerIds.toList())
         }
-        node = result.node
 
-        for (peerId in node.peerIds) {
-            val candidate = node as? CandidateNode ?: break
+        for (peerId in election.peerIds) {
+            if (!mutex.withLock { isCurrentElection(election) }) return
             val response = try {
-                transport.requestVote(peerId, result.value)
+                transport.requestVote(peerId, election.request)
             } catch (_: RaftTransportException) {
                 continue
             }
-            node = candidate.handleRequestVoteResponse(peerId, response)
+            mutex.withLock {
+                if (observeHigherTerm(response.term)) return@withLock
+                if (!isCurrentElection(election)) return@withLock
+                node = election.candidate.handleRequestVoteResponse(peerId, response)
+            }
         }
     }
 
-    suspend fun onHeartbeatTimeout(): Unit = mutex.withLock {
-        val leader = node as? LeaderNode ?: return@withLock
-        val requests = leader.onHeartbeatTimeout()
-        for ((peerId, request) in requests) {
-            replicatePeer(peerId, request)
+    suspend fun onHeartbeatTimeout() {
+        val round = mutex.withLock {
+            val leader = node as? LeaderNode ?: return
+            leader.timer.reset(RaftTimeoutEvent.Heartbeat)
+            leaderRound(leader)
         }
+        replicateRound(round)
     }
 
     suspend fun appendCommand(
         command: RaftCommand,
-    ): RaftLogEntry = mutex.withLock {
-        val leader = node as? LeaderNode
-            ?: error("Only leader can append commands")
-        val entry = leader.appendCommand(command)
-        replicateLocked()
-        entry
+    ): RaftLogEntry {
+        val (entry, round) = mutex.withLock {
+            val leader = node as? LeaderNode
+                ?: error("Only leader can append commands")
+            leader.appendCommand(command) to leaderRound(leader)
+        }
+        replicateRound(round)
+        return entry
     }
 
-    suspend fun replicate(): Unit = mutex.withLock {
-        replicateLocked()
+    suspend fun replicate() {
+        val round = mutex.withLock {
+            val leader = node as? LeaderNode ?: return
+            leaderRound(leader)
+        }
+        replicateRound(round)
     }
 
-    private suspend fun replicateLocked() {
-        for (peerId in node.peerIds) {
-            if (node !is LeaderNode) return
-            replicatePeer(peerId)
+    private suspend fun replicateRound(round: LeaderRound) {
+        for (peerId in round.peerIds) {
+            replicatePeer(round, peerId)
         }
     }
 
     private suspend fun replicatePeer(
+        round: LeaderRound,
         peerId: String,
-        initialRequest: AppendEntriesRequest? = null,
     ) {
-        var request = initialRequest
         while (true) {
-            val leader = node as? LeaderNode ?: return
-            val currentRequest = request ?: leader.createAppendEntries(peerId)
+            val attempt = mutex.withLock {
+                if (!isCurrentLeader(round)) return
+                AppendAttempt(round, round.leader.createAppendEntries(peerId)).also {
+                    appendAttempts[peerId] = it
+                }
+            }
             val response = try {
-                transport.appendEntries(peerId, currentRequest)
+                transport.appendEntries(peerId, attempt.request)
             } catch (_: RaftTransportException) {
                 return
             }
-            node = leader.handleAppendEntriesResponse(
-                peerId,
-                currentRequest,
-                response,
-            )
-            if (response.success || node !is LeaderNode) return
-            request = null
+            val retry = mutex.withLock {
+                if (observeHigherTerm(response.term)) return@withLock false
+                if (
+                    !isCurrentLeader(attempt.round) ||
+                    appendAttempts[peerId] !== attempt ||
+                    response.term != attempt.request.term
+                ) {
+                    return@withLock false
+                }
+                appendAttempts.remove(peerId)
+                node = round.leader.handleAppendEntriesResponse(peerId, attempt.request, response)
+                !response.success && isCurrentLeader(round)
+            }
+            if (!retry) return
         }
     }
+
+    private fun isCurrentElection(round: ElectionRound): Boolean =
+        node === round.candidate && node.persistentState.currentTerm == round.request.term
+
+    private fun leaderRound(leader: LeaderNode) = LeaderRound(
+        leader,
+        leader.persistentState.currentTerm,
+        leader.peerIds.toList(),
+    )
+
+    private fun isCurrentLeader(round: LeaderRound): Boolean =
+        node === round.leader && node.persistentState.currentTerm == round.term
+
+    // Higher terms remain authoritative even when the original RPC is stale.
+    private suspend fun observeHigherTerm(term: Long): Boolean {
+        if (term <= node.persistentState.currentTerm) return false
+        node.persistentStateStore.save(term, null)
+        node.persistentState.currentTerm = term
+        node.persistentState.votedFor = null
+        node = node.follower()
+        appendAttempts.clear()
+        node.timer.reset(RaftTimeoutEvent.Election)
+        return true
+    }
+
+    private data class ElectionRound(
+        val candidate: CandidateNode,
+        val request: RequestVoteRequest,
+        val peerIds: List<String>,
+    )
+
+    private data class LeaderRound(
+        val leader: LeaderNode,
+        val term: Long,
+        val peerIds: List<String>,
+    )
+
+    private class AppendAttempt(
+        val round: LeaderRound,
+        val request: AppendEntriesRequest,
+    )
 }

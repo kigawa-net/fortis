@@ -4,6 +4,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import java.net.DatagramSocket
 import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicInteger
@@ -14,6 +16,7 @@ import net.kigawa.fortis.raft.MemoryRaftPersistentStateStore
 import net.kigawa.fortis.raft.RaftCommand
 import net.kigawa.fortis.raft.RaftStateMachine
 import net.kigawa.fortis.raft.append.AppendEntriesRequest
+import net.kigawa.fortis.raft.candidate.CandidateNode
 import net.kigawa.fortis.raft.leader.LeaderNode
 import net.kigawa.fortis.raft.log.MemoryRaftLog
 import net.kigawa.fortis.raft.log.RaftLogEntry
@@ -23,6 +26,7 @@ import net.kigawa.fortis.raft.transport.RaftPeerAddress
 import net.kigawa.fortis.raft.transport.RaftPeerResolver
 import net.kigawa.fortis.raft.transport.RaftRpcHandler
 import net.kigawa.fortis.raft.transport.RaftTransportException
+import net.kigawa.fortis.raft.transport.RaftTransport
 import net.kigawa.fortis.raft.transport.RpcRaftTransport
 import net.kigawa.fortis.raft.transport.netty.NettyQuicRaftRpcChannel
 import net.kigawa.fortis.raft.transport.netty.NettyQuicRaftRpcServer
@@ -30,6 +34,7 @@ import net.kigawa.fortis.raft.transport.netty.NettyRaftTlsConfig
 import net.kigawa.fortis.raft.transport.netty.TestRaftCertificateAuthority
 import net.kigawa.fortis.raft.vote.RaftVolatileState
 import net.kigawa.fortis.raft.vote.RequestVoteRequest
+import net.kigawa.fortis.raft.vote.RequestVoteResponse
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -40,6 +45,45 @@ import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
 class NettyQuicRaftRpcIntegrationTest {
+    @Test
+    fun simultaneousElectionsReceiveVoteResponsesOverQuicWithoutMutualWaiting() = runNetworkTest {
+        val authority = TestRaftCertificateAuthority.create()
+        val nodeIds = setOf("node-1", "node-2")
+        val addresses = mutableMapOf<String, RaftPeerAddress>()
+        val tlsConfigs = nodeIds.associateWith { tlsConfig(authority, it) }
+        val channels = nodeIds.associateWith {
+            NettyQuicRaftRpcChannel(resolver(addresses), tlsConfigs.getValue(it))
+        }
+        val bothSending = CompletableDeferred<Unit>()
+        val started = AtomicInteger()
+        val completed = AtomicInteger()
+        val nodes = nodeIds.associateWith { nodeId ->
+            val rpc = RpcRaftTransport(channels.getValue(nodeId))
+            val transport = object : RaftTransport by rpc {
+                override suspend fun requestVote(peerId: String, request: RequestVoteRequest): RequestVoteResponse {
+                    if (started.incrementAndGet() == 2) bothSending.complete(Unit)
+                    bothSending.await()
+                    return rpc.requestVote(peerId, request).also { completed.incrementAndGet() }
+                }
+            }
+            node(nodeId, transport, peerIds = nodeIds - nodeId)
+        }
+        val servers = nodeIds.associateWith { server(nodes.getValue(it), tlsConfigs.getValue(it)) }
+        try {
+            startServers(servers, addresses)
+            withTimeout(5.seconds) {
+                nodes.values.map { async { it.runtime.onElectionTimeout() } }.awaitAll()
+            }
+            assertEquals(2, completed.get())
+            for (fixture in nodes.values) {
+                assertIs<CandidateNode>(fixture.runtime.currentNode)
+                assertEquals(1L, fixture.runtime.currentNode.persistentState.currentTerm)
+            }
+        } finally {
+            close(channels.values, servers.values)
+        }
+    }
+
     @Test
     fun connectTimeoutAllowsLaterReconnectToAvailablePeer() = runNetworkTest {
         val authority = TestRaftCertificateAuthority.create()
@@ -457,15 +501,16 @@ class NettyQuicRaftRpcIntegrationTest {
 
     private suspend fun node(
         nodeId: String,
-        transport: RpcRaftTransport,
+        transport: RaftTransport,
         stateMachine: RecordingStateMachine = RecordingStateMachine(),
         timer: RaftTimer = RaftTimer.None,
+        peerIds: Set<String> = NODE_IDS - nodeId,
     ): NodeFixture {
         val volatileState = RaftVolatileState()
         val log = MemoryRaftLog()
         val initialNode = RaftNodeBuilder(
             nodeId = nodeId,
-            peerIds = NODE_IDS - nodeId,
+            peerIds = peerIds,
             persistentStateStore = MemoryRaftPersistentStateStore(),
             volatileState = volatileState,
             log = log,
