@@ -413,7 +413,7 @@ class NettyQuicRaftRpcIntegrationTest {
     }
 
     @Test
-    fun threeNodesElectReplicateCommitAndApplyOverMutualTlsQuic() = runNetworkTest {
+    fun threeNodesElectCommitAndApplyProposalOverMutualTlsQuic() = runNetworkTest {
         val authority = TestRaftCertificateAuthority.create()
         val addresses = mutableMapOf<String, RaftPeerAddress>()
         val resolver = resolver(addresses)
@@ -436,7 +436,11 @@ class NettyQuicRaftRpcIntegrationTest {
             assertIs<LeaderNode>(leader.runtime.currentNode)
 
             val command = RaftCommand.Put(byteArrayOf(1), byteArrayOf(10))
-            leader.runtime.appendCommand(command)
+            val receipt = leader.runtime.propose(command)
+            assertEquals(1L, receipt.index)
+            assertEquals(1L, receipt.term)
+            assertEquals(command, receipt.command)
+            assertEquals(1L, leader.volatileState.lastApplied)
             leader.runtime.onHeartbeatTimeout()
 
             for ((_, volatileState, log, stateMachine) in nodes.values) {
@@ -447,6 +451,7 @@ class NettyQuicRaftRpcIntegrationTest {
             }
             assertEquals(2, channels.getValue("node-1").connectionCreationCount)
         } finally {
+            nodes.values.forEach { it.runtime.stop() }
             close(channels.values, servers.values)
         }
     }

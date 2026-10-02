@@ -1,9 +1,19 @@
 package net.kigawa.fortis.raft.runtime
 
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeout
+import kotlin.coroutines.CoroutineContext
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
 import net.kigawa.fortis.raft.RaftCommand
 import net.kigawa.fortis.raft.append.AppendEntriesRequest
 import net.kigawa.fortis.raft.append.AppendEntriesResponse
@@ -21,11 +31,15 @@ import net.kigawa.fortis.raft.vote.RequestVoteResponse
 class RaftRuntime(
     initialNode: RaftNode,
     private val transport: RaftTransport,
+    proposalCoroutineContext: CoroutineContext = Dispatchers.Default,
 ) {
     private val mutex = Mutex()
     private val peerRpcMutexes = initialNode.peerIds.associateWith { Mutex() }
     private var node: RaftNode = initialNode
     private val appendAttempts = mutableMapOf<String, AppendAttempt>()
+    private val proposalJob = SupervisorJob(proposalCoroutineContext[Job])
+    private val proposalScope = CoroutineScope(proposalCoroutineContext + proposalJob)
+    private val proposals = mutableMapOf<Long, PendingProposal>()
 
     val currentNode: RaftNode
         get() = node
@@ -35,6 +49,11 @@ class RaftRuntime(
     }
 
     suspend fun stop() {
+        proposalJob.cancel()
+        mutex.withLock {
+            proposals.values.forEach { it.completion.completeExceptionally(RaftProposalStoppedException()) }
+            proposals.clear()
+        }
         node.timer.cancel()
     }
 
@@ -43,6 +62,7 @@ class RaftRuntime(
     ): RequestVoteResponse = mutex.withLock {
         val result = node.handleRequestVote(request)
         node = result.node
+        settleProposals()
         result.value
     }
 
@@ -51,6 +71,7 @@ class RaftRuntime(
     ): AppendEntriesResponse = mutex.withLock {
         val result = node.handleAppendEntries(request)
         node = result.node
+        settleProposals()
         result.value
     }
 
@@ -62,6 +83,7 @@ class RaftRuntime(
                 else -> return
             }
             node = result.node
+            settleProposals()
             val candidate = node as? CandidateNode ?: return
             ElectionRound(candidate, result.value, node.peerIds.toList())
         }
@@ -85,6 +107,7 @@ class RaftRuntime(
                 if (observeHigherTerm(response.term)) return@stateLock
                 if (!isCurrentElection(election)) return@stateLock
                 node = election.candidate.handleRequestVoteResponse(peerId, response)
+                settleProposals()
             }
         }
     }
@@ -98,6 +121,7 @@ class RaftRuntime(
         replicateRound(round)
     }
 
+    /** Local append and replication attempt; use [propose] for a committed and applied write. */
     suspend fun appendCommand(
         command: RaftCommand,
     ): RaftLogEntry {
@@ -108,6 +132,54 @@ class RaftRuntime(
         }
         replicateRound(round)
         return entry
+    }
+
+    /**
+     * Returns only after majority commit and local apply of this index and term.
+     * Timeout/cancellation ends the wait, without rolling back an accepted log entry;
+     * its outcome is unknown and replication may still commit it later.
+     * Leadership loss fails a pending proposal, also without rolling back its entry.
+     * [stop] fails pending proposals and prevents new proposal submissions.
+     */
+    suspend fun propose(command: RaftCommand, timeout: Duration = 5.seconds): RaftLogEntry {
+        require(timeout.isPositive() && timeout.isFinite()) { "Proposal timeout must be positive and finite" }
+        return withTimeout(timeout) {
+            val completion = CompletableDeferred<RaftLogEntry>()
+            val waiterJob = currentCoroutineContext()[Job]
+            val submission = proposalScope.launch {
+                try {
+                    val round = mutex.withLock {
+                        if (!completion.isActive || waiterJob?.isActive == false) return@launch
+                        if (!proposalJob.isActive) throw RaftProposalStoppedException()
+                        val leader = node as? LeaderNode ?: throw RaftProposalNotLeaderException()
+                        val entry = leader.appendCommand(command)
+                        val round = leaderRound(leader)
+                        if (completion.isActive) proposals[entry.index] = PendingProposal(round, entry, completion)
+                        settleProposals()
+                        round
+                    }
+                    replicateRound(round)
+                } catch (cause: Throwable) {
+                    completion.completeExceptionally(
+                        if (!proposalJob.isActive) RaftProposalStoppedException() else cause,
+                    )
+                }
+            }
+            submission.invokeOnCompletion { cause ->
+                if (cause != null) completion.completeExceptionally(RaftProposalStoppedException())
+            }
+            try {
+                completion.await()
+            } finally {
+                completion.cancel()
+                // Cleanup must not delay a timeout while a state machine is applying.
+                proposalScope.launch {
+                    mutex.withLock {
+                        proposals.entries.removeAll { it.value.completion === completion }
+                    }
+                }
+            }
+        }
     }
 
     suspend fun replicate() {
@@ -155,6 +227,7 @@ class RaftRuntime(
                 }
                 appendAttempts.remove(peerId)
                 node = round.leader.handleAppendEntriesResponse(peerId, attempt.request, response)
+                settleProposals()
                 !response.success && isCurrentLeader(round)
             }
             if (!retry) return
@@ -181,9 +254,41 @@ class RaftRuntime(
         node.persistentState.votedFor = null
         node = node.follower()
         appendAttempts.clear()
+        settleProposals()
         node.timer.reset(RaftTimeoutEvent.Election)
         return true
     }
+
+    private fun settleProposals() {
+        val iterator = proposals.values.iterator()
+        while (iterator.hasNext()) {
+            val proposal = iterator.next()
+            when {
+                !proposal.completion.isActive -> iterator.remove()
+                !proposalJob.isActive -> {
+                    proposal.completion.completeExceptionally(RaftProposalStoppedException())
+                    iterator.remove()
+                }
+                !isCurrentLeader(proposal.round) -> {
+                    proposal.completion.completeExceptionally(
+                        RaftProposalLeadershipLostException(proposal.entry.index, proposal.entry.term),
+                    )
+                    iterator.remove()
+                }
+                node.volatileState.commitIndex >= proposal.entry.index &&
+                    node.volatileState.lastApplied >= proposal.entry.index -> {
+                    proposal.completion.complete(proposal.entry)
+                    iterator.remove()
+                }
+            }
+        }
+    }
+
+    private data class PendingProposal(
+        val round: LeaderRound,
+        val entry: RaftLogEntry,
+        val completion: CompletableDeferred<RaftLogEntry>,
+    )
 
     private data class ElectionRound(
         val candidate: CandidateNode,
