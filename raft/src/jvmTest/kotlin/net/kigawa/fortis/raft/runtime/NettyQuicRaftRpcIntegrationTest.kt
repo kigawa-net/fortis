@@ -1,6 +1,10 @@
 package net.kigawa.fortis.raft.runtime
 
+import kotlinx.coroutines.Dispatchers
+import java.net.DatagramSocket
+import java.net.InetSocketAddress
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import net.kigawa.fortis.raft.MemoryRaftPersistentStateStore
 import net.kigawa.fortis.raft.RaftCommand
 import net.kigawa.fortis.raft.RaftStateMachine
@@ -22,8 +26,140 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
+import kotlin.test.assertNotEquals
+import kotlin.test.assertTrue
 
 class NettyQuicRaftRpcIntegrationTest {
+    @Test
+    fun reconnectsAfterServerRestartsOnSamePort() = runTest {
+        reconnectAfterServerRestart(changePort = false)
+    }
+
+    @Test
+    fun reconnectsToUpdatedResolverAddressAfterServerRestarts() = runTest {
+        reconnectAfterServerRestart(changePort = true)
+    }
+
+    private suspend fun reconnectAfterServerRestart(changePort: Boolean) {
+        val authority = TestRaftCertificateAuthority.create()
+        val addresses = mutableMapOf<String, RaftPeerAddress>()
+        val channel = NettyQuicRaftRpcChannel(resolver(addresses), tlsConfig(authority, "node-1"))
+        val transport = RpcRaftTransport(channel)
+        val fixture = node("node-2", transport)
+        val serverTls = tlsConfig(authority, "node-2")
+        val original = server(fixture, serverTls)
+        val servers = mutableListOf(original)
+        try {
+            original.start()
+            val oldAddress = original.boundAddress
+            addresses["node-2"] = oldAddress
+            assertTrue(transport.requestVote("node-2", voteRequest("node-1")).voteGranted)
+            assertTrue(transport.requestVote("node-2", voteRequest("node-1")).voteGranted)
+            assertEquals(1, channel.connectionCreationCount)
+
+            original.stop()
+            assertFailsWith<RaftTransportException> {
+                transport.requestVote("node-2", voteRequest("node-1"))
+            }
+            assertEquals(1, channel.connectionCreationCount)
+
+            // Reserve the old port so an ephemeral bind cannot accidentally reuse it.
+            val reservation = if (changePort) {
+                withContext(Dispatchers.IO) {
+                    DatagramSocket(InetSocketAddress(oldAddress.host, oldAddress.port))
+                }
+            } else {
+                null
+            }
+            reservation.use {
+                val restarted = server(
+                    fixture,
+                    serverTls,
+                    if (changePort) RaftPeerAddress("127.0.0.1", 0) else oldAddress,
+                )
+                servers.add(restarted)
+                restarted.start()
+                if (changePort) {
+                    assertNotEquals(oldAddress.port, restarted.boundAddress.port)
+                } else {
+                    assertEquals(oldAddress.port, restarted.boundAddress.port)
+                }
+                addresses["node-2"] = restarted.boundAddress
+                assertTrue(transport.requestVote("node-2", voteRequest("node-1")).voteGranted)
+                assertEquals(2, channel.connectionCreationCount)
+                assertTrue(transport.requestVote("node-2", voteRequest("node-1")).voteGranted)
+                assertEquals(2, channel.connectionCreationCount)
+            }
+        } finally {
+            close(listOf(channel), servers)
+        }
+    }
+
+    @Test
+    fun offlineFollowerCatchesUpAndAppliesCommittedCommandsAfterQuicServerRestart() = runTest {
+        val authority = TestRaftCertificateAuthority.create()
+        val addresses = mutableMapOf<String, RaftPeerAddress>()
+        val tlsConfigs = NODE_IDS.associateWith { tlsConfig(authority, it) }
+        val channels = NODE_IDS.associateWith {
+            NettyQuicRaftRpcChannel(resolver(addresses), tlsConfigs.getValue(it))
+        }
+        val nodes = NODE_IDS.associateWith { node(it, RpcRaftTransport(channels.getValue(it))) }
+        val servers = NODE_IDS.associateWith { server(nodes.getValue(it), tlsConfigs.getValue(it)) }
+        val allServers = servers.values.toMutableList()
+        try {
+            startServers(servers, addresses)
+            val leader = nodes.getValue("node-1")
+            val recovered = nodes.getValue("node-3")
+            val leaderChannel = channels.getValue("node-1")
+            leader.runtime.onElectionTimeout()
+            assertIs<LeaderNode>(leader.runtime.currentNode)
+            leader.runtime.onHeartbeatTimeout()
+            assertEquals(2, leaderChannel.connectionCreationCount)
+
+            val oldAddress = servers.getValue("node-3").boundAddress
+            servers.getValue("node-3").stop()
+            val commands: List<RaftCommand> = (1..3).map { value ->
+                RaftCommand.Put(byteArrayOf(value.toByte()), byteArrayOf((value * 10).toByte()))
+            }
+            commands.forEach { leader.runtime.appendCommand(it) }
+            leader.runtime.onHeartbeatTimeout()
+
+            assertIs<LeaderNode>(leader.runtime.currentNode)
+            for (nodeId in listOf("node-1", "node-2")) {
+                val fixture = nodes.getValue(nodeId)
+                assertEquals(commands, (1L..3L).map { fixture.log.get(it)?.command })
+                assertEquals(3L, fixture.volatileState.commitIndex)
+                assertEquals(3L, fixture.volatileState.lastApplied)
+                assertEquals(commands, fixture.stateMachine.applied)
+            }
+            assertEquals(0L, recovered.log.lastIndex())
+            assertEquals(0L, recovered.volatileState.commitIndex)
+            assertEquals(0L, recovered.volatileState.lastApplied)
+            assertEquals(emptyList(), recovered.stateMachine.applied)
+            // Healthy-peer connections can also expire while the offline peer times out.
+            val connectionsBeforeRecovery = leaderChannel.connectionCreationCount
+
+            val restarted = server(recovered, tlsConfigs.getValue("node-3"), oldAddress)
+            allServers.add(restarted)
+            restarted.start()
+            addresses["node-3"] = restarted.boundAddress
+            leader.runtime.onHeartbeatTimeout()
+
+            assertEquals(3L, recovered.log.lastIndex())
+            assertEquals(commands, (1L..3L).map { recovered.log.get(it)?.command })
+            assertEquals(3L, recovered.volatileState.commitIndex)
+            assertEquals(3L, recovered.volatileState.lastApplied)
+            assertEquals(commands, recovered.stateMachine.applied)
+            assertTrue(leaderChannel.connectionCreationCount > connectionsBeforeRecovery)
+            val connectionsAfterRecovery = leaderChannel.connectionCreationCount
+            leader.runtime.onHeartbeatTimeout()
+            assertEquals(commands, recovered.stateMachine.applied)
+            assertEquals(connectionsAfterRecovery, leaderChannel.connectionCreationCount)
+        } finally {
+            close(channels.values, allServers)
+        }
+    }
+
     @Test
     fun threeNodesElectReplicateCommitAndApplyOverMutualTlsQuic() = runTest {
         val authority = TestRaftCertificateAuthority.create()
@@ -189,8 +325,9 @@ class NettyQuicRaftRpcIntegrationTest {
     private fun server(
         fixture: NodeFixture,
         tlsConfig: NettyRaftTlsConfig,
+        address: RaftPeerAddress = RaftPeerAddress("127.0.0.1", 0),
     ) = NettyQuicRaftRpcServer(
-        RaftPeerAddress("127.0.0.1", 0),
+        address,
         RaftRpcHandler(fixture.runtime),
         tlsConfig,
     )
