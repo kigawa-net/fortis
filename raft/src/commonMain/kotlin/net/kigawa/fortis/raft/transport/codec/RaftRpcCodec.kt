@@ -4,6 +4,7 @@ import net.kigawa.fortis.raft.RaftCommand
 import net.kigawa.fortis.raft.append.AppendEntriesRequest
 import net.kigawa.fortis.raft.append.AppendEntriesResponse
 import net.kigawa.fortis.raft.log.RaftLogEntry
+import net.kigawa.fortis.raft.log.RaftLogEntryPayload
 import net.kigawa.fortis.raft.vote.RequestVoteRequest
 import net.kigawa.fortis.raft.vote.RequestVoteResponse
 
@@ -183,10 +184,12 @@ class RaftRpcCodec(
         val valueLength = when (val command = entry.command) {
             is RaftCommand.Put -> command.value.size
             is RaftCommand.Delete -> 0
+            null -> 0
         }
         val keyLength = when (val command = entry.command) {
             is RaftCommand.Put -> command.key.size
             is RaftCommand.Delete -> command.key.size
+            null -> 0
         }
         val entrySize = 25L + keyLength + valueLength
         require(entrySize <= Int.MAX_VALUE) { "Raft RPC log entry is too large" }
@@ -201,16 +204,24 @@ class RaftRpcCodec(
         val commandType: Byte
         val key: ByteArray
         val value: ByteArray?
-        when (val command = entry.command) {
-            is RaftCommand.Put -> {
-                commandType = PUT
-                key = command.key
-                value = command.value
+        when (val payload = entry.payload) {
+            is RaftLogEntryPayload.Command -> when (val command = payload.command) {
+                is RaftCommand.Put -> {
+                    commandType = PUT
+                    key = command.key
+                    value = command.value
+                }
+
+                is RaftCommand.Delete -> {
+                    commandType = DELETE
+                    key = command.key
+                    value = null
+                }
             }
 
-            is RaftCommand.Delete -> {
-                commandType = DELETE
-                key = command.key
+            RaftLogEntryPayload.NoOp -> {
+                commandType = NO_OP
+                key = byteArrayOf()
                 value = null
             }
         }
@@ -357,7 +368,7 @@ class RaftRpcCodec(
         val valueLength = readInt(data, start + 21)
         if (index <= 0) return EntryResult.Corrupted("Invalid log index: $index")
         if (term < 0) return EntryResult.Corrupted("Invalid log term: $term")
-        if (commandType != PUT && commandType != DELETE) {
+        if (commandType != PUT && commandType != DELETE && commandType != NO_OP) {
             return EntryResult.Corrupted("Unknown Raft command type: $commandType")
         }
         if (keyLength < 0) return EntryResult.Corrupted("Invalid key length: $keyLength")
@@ -370,6 +381,9 @@ class RaftRpcCodec(
                 return EntryResult.Corrupted("DELETE command must not contain a value")
             }
         }
+        if (commandType == NO_OP && (keyLength != 0 || valueLength != -1)) {
+            return EntryResult.Corrupted("NO_OP entry must not contain key or value")
+        }
         val entrySize = MIN_ENTRY_SIZE.toLong() + keyLength + maxOf(valueLength, 0)
         if (entrySize > end.toLong() - start) {
             return EntryResult.Corrupted("Truncated log entry payload")
@@ -377,13 +391,15 @@ class RaftRpcCodec(
         val keyStart = start + MIN_ENTRY_SIZE
         val keyEnd = keyStart + keyLength
         val key = data.copyOfRange(keyStart, keyEnd)
-        val command = if (commandType == PUT) {
-            RaftCommand.Put(key, data.copyOfRange(keyEnd, keyEnd + valueLength))
-        } else {
-            RaftCommand.Delete(key)
+        val payload = when (commandType) {
+            PUT -> RaftLogEntryPayload.Command(
+                RaftCommand.Put(key, data.copyOfRange(keyEnd, keyEnd + valueLength)),
+            )
+            DELETE -> RaftLogEntryPayload.Command(RaftCommand.Delete(key))
+            else -> RaftLogEntryPayload.NoOp
         }
         return EntryResult.Success(
-            RaftLogEntry(index, term, command),
+            RaftLogEntry(index, term, payload),
             entrySize.toInt(),
         )
     }
@@ -468,6 +484,7 @@ class RaftRpcCodec(
         private const val MIN_ENTRY_SIZE = 25
         private const val PUT: Byte = 1
         private const val DELETE: Byte = 2
+        private const val NO_OP: Byte = 3
         private val MAGIC = byteArrayOf(
             'F'.code.toByte(),
             'R'.code.toByte(),

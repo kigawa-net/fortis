@@ -72,6 +72,20 @@ class RaftLogCodecTest {
         assertIs<RaftLogDecodeResult.Corrupted>(codec.decode(encoded))
     }
 
+    @Test
+    fun noOpEntryRoundTripsWithoutCommand() {
+        assertRoundTrip(RaftLogEntry(1, 2, RaftLogEntryPayload.NoOp))
+    }
+
+    @Test
+    fun noOpWithKeyOrValueIsCorrupted() {
+        val entry = RaftLogEntry(1, 2, RaftLogEntryPayload.NoOp)
+        val withKey = codec.encode(entry).also { it[25] = 1 }
+        val withValue = codec.encode(entry).also { for (i in 26..29) it[i] = 0 }
+        assertIs<RaftLogDecodeResult.Corrupted>(codec.decode(withKey))
+        assertIs<RaftLogDecodeResult.Corrupted>(codec.decode(withValue))
+    }
+
     private fun assertRoundTrip(entry: RaftLogEntry) {
         val encoded = codec.encode(entry)
         val result = assertIs<RaftLogDecodeResult.Success>(

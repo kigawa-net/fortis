@@ -33,11 +33,11 @@ class RaftProposalTest {
         runCurrent()
         assertTrue(proposal.isCompleted)
         val receipt = proposal.await()
-        assertEquals(1L, receipt.index)
+        assertEquals(2L, receipt.index)
         assertEquals(1L, receipt.term)
         assertEquals(command(1), receipt.command)
-        assertEquals(1L, fixture.state.commitIndex)
-        assertEquals(1L, fixture.state.lastApplied)
+        assertEquals(2L, fixture.state.commitIndex)
+        assertEquals(2L, fixture.state.lastApplied)
         assertEquals(listOf(command(1)), fixture.applied)
         slow.complete(Unit)
         fixture.runtime.stop()
@@ -54,7 +54,7 @@ class RaftProposalTest {
         }
         runCurrent()
         assertTrue(proposal.isActive)
-        assertEquals(1L, fixture.log.lastIndex())
+        assertEquals(2L, fixture.log.lastIndex())
         assertEquals(0L, fixture.state.commitIndex)
         advanceTimeBy(100.milliseconds)
         runCurrent()
@@ -71,13 +71,13 @@ class RaftProposalTest {
         val proposal = async { fixture.runtime.propose(command(1)) }
         runCurrent()
         assertTrue(entered.isCompleted)
-        assertEquals(1L, fixture.state.commitIndex)
-        assertEquals(0L, fixture.state.lastApplied)
+        assertEquals(2L, fixture.state.commitIndex)
+        assertEquals(1L, fixture.state.lastApplied)
         assertTrue(proposal.isActive)
         release.complete(Unit)
         runCurrent()
-        assertEquals(1L, proposal.await().index)
-        assertEquals(1L, fixture.state.lastApplied)
+        assertEquals(2L, proposal.await().index)
+        assertEquals(2L, fixture.state.lastApplied)
         fixture.runtime.stop()
     }
 
@@ -91,8 +91,8 @@ class RaftProposalTest {
             }
         }
         runCurrent()
-        assertEquals(1L, fixture.state.commitIndex)
-        assertEquals(0L, fixture.state.lastApplied)
+        assertEquals(2L, fixture.state.commitIndex)
+        assertEquals(1L, fixture.state.lastApplied)
         advanceTimeBy(100.milliseconds)
         runCurrent()
         assertTrue(proposal.isCompleted)
@@ -100,8 +100,8 @@ class RaftProposalTest {
         release.complete(Unit)
         runCurrent()
         assertEquals(listOf(command(1)), fixture.applied)
-        assertEquals(1L, fixture.state.lastApplied)
-        assertEquals(2L, fixture.runtime.propose(command(2)).index)
+        assertEquals(2L, fixture.state.lastApplied)
+        assertEquals(3L, fixture.runtime.propose(command(2)).index)
         assertEquals(listOf(command(1), command(2)), fixture.applied)
         fixture.runtime.stop()
     }
@@ -116,7 +116,7 @@ class RaftProposalTest {
         runCurrent()
         fixture.runtime.handleAppendEntries(AppendEntriesRequest(1, "node-2", 0, 0, emptyList(), 0))
         val failure = proposal.await()
-        assertEquals(1L, failure.index)
+        assertEquals(2L, failure.index)
         assertEquals(1L, failure.term)
         assertEquals(0L, fixture.state.commitIndex)
         fixture.runtime.stop()
@@ -138,12 +138,12 @@ class RaftProposalTest {
         val fixture = fixture(transport)
         val proposal = async { fixture.runtime.propose(command(1)) }
         runCurrent()
-        assertEquals(1L, fixture.log.lastIndex())
+        assertEquals(2L, fixture.log.lastIndex())
         proposal.cancelAndJoin()
         assertFailsWith<CancellationException> { proposal.await() }
         transport.unavailable = false
         fixture.runtime.onHeartbeatTimeout()
-        assertEquals(1L, fixture.state.commitIndex)
+        assertEquals(2L, fixture.state.commitIndex)
         assertEquals(listOf(command(1)), fixture.applied)
         fixture.runtime.stop()
     }
@@ -154,8 +154,8 @@ class RaftProposalTest {
         val proposal = async(start = CoroutineStart.UNDISPATCHED) { fixture.runtime.propose(command(1)) }
         proposal.cancelAndJoin()
         runCurrent()
-        assertEquals(0L, fixture.log.lastIndex())
-        assertEquals(1L, fixture.runtime.propose(command(2)).index)
+        assertEquals(1L, fixture.log.lastIndex())
+        assertEquals(2L, fixture.runtime.propose(command(2)).index)
         assertEquals(listOf(command(2)), fixture.applied)
         fixture.runtime.stop()
     }
@@ -167,12 +167,12 @@ class RaftProposalTest {
         val first = async { fixture.runtime.propose(command(1)) }
         val second = async { fixture.runtime.propose(command(2)) }
         runCurrent()
-        assertEquals(2L, fixture.log.lastIndex())
+        assertEquals(3L, fixture.log.lastIndex())
         assertTrue(first.isActive && second.isActive)
         transport.unavailable = false
         fixture.runtime.replicate()
-        assertEquals(1L, first.await().index)
-        assertEquals(2L, second.await().index)
+        assertEquals(2L, first.await().index)
+        assertEquals(3L, second.await().index)
         assertEquals(listOf(command(1), command(2)), fixture.applied)
         fixture.runtime.stop()
     }
@@ -182,8 +182,8 @@ class RaftProposalTest {
         val fixture = fixture(beforeApply = { error("apply failed") })
         val failure = assertFailsWith<IllegalStateException> { fixture.runtime.propose(command(1)) }
         assertEquals("apply failed", failure.message)
-        assertEquals(1L, fixture.state.commitIndex)
-        assertEquals(0L, fixture.state.lastApplied)
+        assertEquals(2L, fixture.state.commitIndex)
+        assertEquals(1L, fixture.state.lastApplied)
         fixture.runtime.stop()
     }
 
@@ -206,7 +206,7 @@ class RaftProposalTest {
         fixture.runtime.stop()
         proposal.await()
         assertFailsWith<RaftProposalStoppedException> { fixture.runtime.propose(command(2)) }
-        assertEquals(1L, fixture.log.lastIndex())
+        assertEquals(2L, fixture.log.lastIndex())
     }
 
     private suspend fun TestScope.fixture(

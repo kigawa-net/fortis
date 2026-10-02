@@ -21,6 +21,7 @@ import net.kigawa.fortis.raft.candidate.CandidateNode
 import net.kigawa.fortis.raft.leader.LeaderNode
 import net.kigawa.fortis.raft.log.MemoryRaftLog
 import net.kigawa.fortis.raft.log.RaftLogEntry
+import net.kigawa.fortis.raft.log.RaftLogEntryPayload
 import net.kigawa.fortis.raft.node.RaftNodeBuilder
 import net.kigawa.fortis.raft.node.RaftTimer
 import net.kigawa.fortis.raft.transport.RaftPeerAddress
@@ -38,6 +39,7 @@ import net.kigawa.fortis.raft.vote.RequestVoteRequest
 import net.kigawa.fortis.raft.vote.RequestVoteResponse
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
@@ -82,11 +84,11 @@ class NettyQuicRaftRpcIntegrationTest {
                 val command = RaftCommand.Put(byteArrayOf(1), byteArrayOf(10))
                 val append = async { leader.runtime.appendCommand(command) }
                 withTimeout(500.milliseconds) {
-                    while (leader.volatileState.lastApplied != 1L) delay(10.milliseconds)
+                    while (leader.volatileState.lastApplied != 2L) delay(10.milliseconds)
                 }
-                assertEquals(1L, leader.volatileState.commitIndex)
+                assertEquals(2L, leader.volatileState.commitIndex)
                 assertEquals(listOf<RaftCommand>(command), leader.stateMachine.applied)
-                assertEquals(command, healthy.log.get(1)?.command)
+                assertEquals(command, healthy.log.get(2)?.command)
                 assertTrue(election.isActive)
                 election.await()
                 append.await()
@@ -268,7 +270,7 @@ class NettyQuicRaftRpcIntegrationTest {
             assertEquals(heartbeatsBeforeTimeout + 1, healthyHeartbeats.get())
             assertTrue(entered.isCompleted)
             assertIs<LeaderNode>(leader.runtime.currentNode)
-            assertEquals(1L, leader.volatileState.commitIndex)
+            assertEquals(2L, leader.volatileState.commitIndex)
             assertEquals(listOf<RaftCommand>(command), leader.stateMachine.applied)
             assertEquals(listOf<RaftCommand>(command), nodes.getValue("node-3").stateMachine.applied)
             assertEquals(emptyList(), stalledStateMachine.applied)
@@ -366,6 +368,7 @@ class NettyQuicRaftRpcIntegrationTest {
             leader.runtime.onElectionTimeout()
             assertIs<LeaderNode>(leader.runtime.currentNode)
             leader.runtime.onHeartbeatTimeout()
+            leader.runtime.onHeartbeatTimeout()
             assertEquals(2, leaderChannel.connectionCreationCount)
 
             val oldAddress = servers.getValue("node-3").boundAddress
@@ -379,14 +382,14 @@ class NettyQuicRaftRpcIntegrationTest {
             assertIs<LeaderNode>(leader.runtime.currentNode)
             for (nodeId in listOf("node-1", "node-2")) {
                 val fixture = nodes.getValue(nodeId)
-                assertEquals(commands, (1L..3L).map { fixture.log.get(it)?.command })
-                assertEquals(3L, fixture.volatileState.commitIndex)
-                assertEquals(3L, fixture.volatileState.lastApplied)
+                assertEquals(commands, (2L..4L).map { fixture.log.get(it)?.command })
+                assertEquals(4L, fixture.volatileState.commitIndex)
+                assertEquals(4L, fixture.volatileState.lastApplied)
                 assertEquals(commands, fixture.stateMachine.applied)
             }
-            assertEquals(0L, recovered.log.lastIndex())
-            assertEquals(0L, recovered.volatileState.commitIndex)
-            assertEquals(0L, recovered.volatileState.lastApplied)
+            assertEquals(1L, recovered.log.lastIndex())
+            assertEquals(1L, recovered.volatileState.commitIndex)
+            assertEquals(1L, recovered.volatileState.lastApplied)
             assertEquals(emptyList(), recovered.stateMachine.applied)
             // Healthy-peer connections can also expire while the offline peer times out.
             val connectionsBeforeRecovery = leaderChannel.connectionCreationCount
@@ -397,10 +400,10 @@ class NettyQuicRaftRpcIntegrationTest {
             addresses["node-3"] = restarted.boundAddress
             leader.runtime.onHeartbeatTimeout()
 
-            assertEquals(3L, recovered.log.lastIndex())
-            assertEquals(commands, (1L..3L).map { recovered.log.get(it)?.command })
-            assertEquals(3L, recovered.volatileState.commitIndex)
-            assertEquals(3L, recovered.volatileState.lastApplied)
+            assertEquals(4L, recovered.log.lastIndex())
+            assertEquals(commands, (2L..4L).map { recovered.log.get(it)?.command })
+            assertEquals(4L, recovered.volatileState.commitIndex)
+            assertEquals(4L, recovered.volatileState.lastApplied)
             assertEquals(commands, recovered.stateMachine.applied)
             assertTrue(leaderChannel.connectionCreationCount > connectionsBeforeRecovery)
             val connectionsAfterRecovery = leaderChannel.connectionCreationCount
@@ -433,20 +436,28 @@ class NettyQuicRaftRpcIntegrationTest {
             val leader = nodes.getValue("node-1")
 
             leader.runtime.onElectionTimeout()
-            assertIs<LeaderNode>(leader.runtime.currentNode)
+            val electedLeader = assertIs<LeaderNode>(leader.runtime.currentNode)
+            assertFalse(electedLeader.isReady)
+            assertEquals(RaftLogEntryPayload.NoOp, leader.log.get(1)?.payload)
+            leader.runtime.onHeartbeatTimeout()
+            assertTrue(electedLeader.isReady)
+            assertEquals(1L, leader.volatileState.commitIndex)
+            assertEquals(1L, leader.volatileState.lastApplied)
+            assertEquals(emptyList(), leader.stateMachine.applied)
 
             val command = RaftCommand.Put(byteArrayOf(1), byteArrayOf(10))
             val receipt = leader.runtime.propose(command)
-            assertEquals(1L, receipt.index)
+            assertEquals(2L, receipt.index)
             assertEquals(1L, receipt.term)
             assertEquals(command, receipt.command)
-            assertEquals(1L, leader.volatileState.lastApplied)
+            assertEquals(2L, leader.volatileState.lastApplied)
             leader.runtime.onHeartbeatTimeout()
 
             for ((_, volatileState, log, stateMachine) in nodes.values) {
-                assertEquals(command, log.get(1)?.command)
-                assertEquals(1L, volatileState.commitIndex)
-                assertEquals(1L, volatileState.lastApplied)
+                assertEquals(RaftLogEntryPayload.NoOp, log.get(1)?.payload)
+                assertEquals(command, log.get(2)?.command)
+                assertEquals(2L, volatileState.commitIndex)
+                assertEquals(2L, volatileState.lastApplied)
                 assertEquals(listOf<RaftCommand>(command), stateMachine.applied)
             }
             assertEquals(2, channels.getValue("node-1").connectionCreationCount)

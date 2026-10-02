@@ -4,6 +4,7 @@ import net.kigawa.fortis.raft.RaftCommand
 import net.kigawa.fortis.raft.append.AppendEntriesRequest
 import net.kigawa.fortis.raft.append.AppendEntriesResponse
 import net.kigawa.fortis.raft.log.RaftLogEntry
+import net.kigawa.fortis.raft.log.RaftLogEntryPayload
 import net.kigawa.fortis.raft.transport.codec.RaftRpcCodec
 import net.kigawa.fortis.raft.transport.codec.RaftRpcDecodeResult
 import net.kigawa.fortis.raft.transport.codec.RaftRpcMessage
@@ -158,6 +159,30 @@ class RaftRpcCodecTest {
 
         assertIs<RaftRpcDecodeResult.Corrupted>(limitedCodec.decode(encoded))
     }
+
+    @Test
+    fun appendEntriesWithCommandAndNoOpRoundTrips() {
+        assertRoundTrip(noOpMessage().let { message ->
+            message.copy(request = message.request.copy(entries = listOf(
+                RaftLogEntry(1, 2, RaftCommand.Delete(byteArrayOf(1))),
+                RaftLogEntry(2, 2, RaftLogEntryPayload.NoOp),
+            )))
+        })
+    }
+
+    @Test
+    fun noOpWithKeyOrValueIsCorrupted() {
+        val frame = codec.encode(noOpMessage())
+        val entryStart = frame.size - 25
+        val withKey = frame.copyOf().also { writeInt(it, entryStart + 17, 1) }
+        val withValue = frame.copyOf().also { writeInt(it, entryStart + 21, 0) }
+        assertIs<RaftRpcDecodeResult.Corrupted>(codec.decode(withKey))
+        assertIs<RaftRpcDecodeResult.Corrupted>(codec.decode(withValue))
+    }
+
+    private fun noOpMessage() = RaftRpcMessage.AppendEntries(
+        AppendEntriesRequest(2, "leader", 0, 0, listOf(RaftLogEntry(1, 2, RaftLogEntryPayload.NoOp)), 0),
+    )
 
     private fun assertRoundTrip(message: RaftRpcMessage) {
         val encoded = codec.encode(message)

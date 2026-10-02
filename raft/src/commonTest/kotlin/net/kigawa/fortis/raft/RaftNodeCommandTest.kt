@@ -26,10 +26,10 @@ class RaftNodeCommandTest {
 
         val entry = fixture.leader.appendCommand(command)
 
-        assertEquals(1L, entry.index)
+        assertEquals(2L, entry.index)
         assertEquals(1L, entry.term)
         assertEquals(command, entry.command)
-        assertEquals(entry, fixture.log.get(1))
+        assertEquals(entry, fixture.log.get(2))
     }
 
     @Test
@@ -47,8 +47,8 @@ class RaftNodeCommandTest {
         )
 
         assertIs<LeaderNode>(nextNode)
-        assertEquals(1L, fixture.volatileState.commitIndex)
-        assertEquals(1L, fixture.volatileState.lastApplied)
+        assertEquals(2L, fixture.volatileState.commitIndex)
+        assertEquals(2L, fixture.volatileState.lastApplied)
         assertEquals(listOf<RaftCommand>(command), fixture.stateMachine.applied)
     }
 
@@ -61,8 +61,8 @@ class RaftNodeCommandTest {
 
         leader.appendCommand(command)
 
-        assertEquals(1L, fixture.volatileState.commitIndex)
-        assertEquals(1L, fixture.volatileState.lastApplied)
+        assertEquals(2L, fixture.volatileState.commitIndex)
+        assertEquals(2L, fixture.volatileState.lastApplied)
         assertEquals(listOf<RaftCommand>(command), fixture.stateMachine.applied)
     }
 

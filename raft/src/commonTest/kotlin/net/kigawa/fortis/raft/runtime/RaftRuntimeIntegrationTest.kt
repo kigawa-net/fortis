@@ -3,6 +3,7 @@ package net.kigawa.fortis.raft.runtime
 import kotlinx.coroutines.test.runTest
 import net.kigawa.fortis.raft.MemoryRaftPersistentStateStore
 import net.kigawa.fortis.raft.RaftCommand
+import net.kigawa.fortis.raft.RaftPersistentState
 import net.kigawa.fortis.raft.RaftStateMachine
 import net.kigawa.fortis.raft.append.AppendEntriesRequest
 import net.kigawa.fortis.raft.append.AppendEntriesResponse
@@ -42,10 +43,10 @@ class RaftRuntimeIntegrationTest {
 
         leader.runtime.appendCommand(command)
 
-        assertEquals(1L, leader.volatileState.commitIndex)
+        assertEquals(2L, leader.volatileState.commitIndex)
         assertEquals(listOf<RaftCommand>(command), leader.stateMachine.applied)
         assertEquals(0L, cluster.nodes.getValue("node-2").log.lastIndex())
-        assertEquals(command, cluster.nodes.getValue("node-3").log.get(1)?.command)
+        assertEquals(command, cluster.nodes.getValue("node-3").log.get(2)?.command)
     }
 
     @Test
@@ -59,7 +60,7 @@ class RaftRuntimeIntegrationTest {
         leader.runtime.appendCommand(command)
 
         assertIs<LeaderNode>(leader.runtime.currentNode)
-        assertEquals(command, leader.log.get(1)?.command)
+        assertEquals(command, leader.log.get(2)?.command)
         assertEquals(0L, leader.volatileState.commitIndex)
         assertEquals(0L, leader.volatileState.lastApplied)
         assertEquals(emptyList(), leader.stateMachine.applied)
@@ -91,16 +92,16 @@ class RaftRuntimeIntegrationTest {
         }
         commands.forEach { leader.runtime.appendCommand(it) }
 
-        assertEquals(3L, leader.volatileState.commitIndex)
+        assertEquals(4L, leader.volatileState.commitIndex)
         assertEquals(0L, recovered.log.lastIndex())
 
         cluster.transport.unavailablePeers.remove("node-3")
         leader.runtime.onHeartbeatTimeout()
 
-        assertEquals(3L, recovered.log.lastIndex())
-        assertEquals(commands, (1L..3L).map { recovered.log.get(it)?.command })
-        assertEquals(3L, recovered.volatileState.commitIndex)
-        assertEquals(3L, recovered.volatileState.lastApplied)
+        assertEquals(4L, recovered.log.lastIndex())
+        assertEquals(commands, (2L..4L).map { recovered.log.get(it)?.command })
+        assertEquals(4L, recovered.volatileState.commitIndex)
+        assertEquals(4L, recovered.volatileState.lastApplied)
         assertEquals(commands, recovered.stateMachine.applied)
     }
 
@@ -118,24 +119,24 @@ class RaftRuntimeIntegrationTest {
         )
         leader.runtime.appendCommand(command)
 
-        assertEquals(1L, leader.volatileState.commitIndex)
+        assertEquals(2L, leader.volatileState.commitIndex)
         assertEquals(listOf<RaftCommand>(command), leader.stateMachine.applied)
         for (fixture in cluster.nodes.values) {
-            assertEquals(command, fixture.log.get(1)?.command)
+            assertEquals(command, fixture.log.get(2)?.command)
         }
 
         leader.runtime.onHeartbeatTimeout()
 
         for (fixture in cluster.nodes.values) {
-            assertEquals(1L, fixture.volatileState.commitIndex)
-            assertEquals(1L, fixture.volatileState.lastApplied)
+            assertEquals(2L, fixture.volatileState.commitIndex)
+            assertEquals(2L, fixture.volatileState.lastApplied)
             assertEquals(listOf<RaftCommand>(command), fixture.stateMachine.applied)
         }
     }
 
     @Test
     fun replicationRetriesUntilBehindFollowerCatchesUp() = runTest {
-        val cluster = cluster()
+        val cluster = cluster(currentTerm = 2)
         appendTerms(cluster.nodes.getValue("node-1").log, 1, 2, 2)
         appendTerms(cluster.nodes.getValue("node-2").log, 1)
         appendTerms(cluster.nodes.getValue("node-3").log, 1, 2, 2)
@@ -151,12 +152,12 @@ class RaftRuntimeIntegrationTest {
                 .getValue("node-2")
                 .map { it.prevLogIndex },
         )
-        assertLogTerms(cluster.nodes.getValue("node-2").log, 1, 2, 2)
+        assertLogTerms(cluster.nodes.getValue("node-2").log, 1, 2, 2, 3)
     }
 
     @Test
     fun replicationReplacesConflictingFollowerEntries() = runTest {
-        val cluster = cluster()
+        val cluster = cluster(currentTerm = 2)
         appendTerms(cluster.nodes.getValue("node-1").log, 1, 2, 2)
         appendTerms(cluster.nodes.getValue("node-2").log, 1, 1, 1)
         appendTerms(cluster.nodes.getValue("node-3").log, 1, 2, 2)
@@ -172,12 +173,12 @@ class RaftRuntimeIntegrationTest {
                 .getValue("node-2")
                 .map { it.prevLogIndex },
         )
-        assertLogTerms(cluster.nodes.getValue("node-2").log, 1, 2, 2)
+        assertLogTerms(cluster.nodes.getValue("node-2").log, 1, 2, 2, 3)
     }
 
     @Test
     fun heartbeatRetriesUntilBehindFollowerCatchesUp() = runTest {
-        val cluster = cluster()
+        val cluster = cluster(currentTerm = 2)
         appendTerms(cluster.nodes.getValue("node-1").log, 1, 2, 2)
         appendTerms(cluster.nodes.getValue("node-2").log, 1)
         appendTerms(cluster.nodes.getValue("node-3").log, 1, 2, 2)
@@ -193,15 +194,15 @@ class RaftRuntimeIntegrationTest {
                 .getValue("node-2")
                 .map { it.prevLogIndex },
         )
-        assertLogTerms(cluster.nodes.getValue("node-2").log, 1, 2, 2)
+        assertLogTerms(cluster.nodes.getValue("node-2").log, 1, 2, 2, 3)
     }
 
-    private suspend fun cluster(): Cluster {
+    private suspend fun cluster(currentTerm: Long = 0): Cluster {
         val localTransport = LocalRaftTransport()
         val recordingTransport = RecordingTransport(localTransport)
         val nodes = mutableMapOf<String, NodeFixture>()
         for (nodeId in listOf("node-1", "node-2", "node-3")) {
-            nodes[nodeId] = nodeFixture(nodeId, recordingTransport)
+            nodes[nodeId] = nodeFixture(nodeId, recordingTransport, currentTerm)
         }
         for ((nodeId, fixture) in nodes) {
             localTransport.register(nodeId, fixture.runtime)
@@ -212,6 +213,7 @@ class RaftRuntimeIntegrationTest {
     private suspend fun nodeFixture(
         nodeId: String,
         transport: RaftTransport,
+        currentTerm: Long,
     ): NodeFixture {
         val peerIds = setOf("node-1", "node-2", "node-3") - nodeId
         val volatileState = RaftVolatileState()
@@ -220,7 +222,7 @@ class RaftRuntimeIntegrationTest {
         val follower = RaftNodeBuilder(
             nodeId = nodeId,
             peerIds = peerIds,
-            persistentStateStore = MemoryRaftPersistentStateStore(),
+            persistentStateStore = MemoryRaftPersistentStateStore(RaftPersistentState(currentTerm)),
             volatileState = volatileState,
             log = log,
             stateMachine = stateMachine,

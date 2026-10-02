@@ -43,7 +43,7 @@ class RaftNodeTimeoutTest {
         val heartbeats = fixture.leader.onHeartbeatTimeout()
 
         assertEquals(setOf("peer-1", "peer-2"), heartbeats.keys)
-        assertTrue(heartbeats.values.all { it.entries.size == 1 })
+        assertTrue(heartbeats.values.all { it.entries.size == 2 })
         assertEquals(
             listOf<RaftTimeoutEvent>(RaftTimeoutEvent.Heartbeat),
             fixture.timer.events,

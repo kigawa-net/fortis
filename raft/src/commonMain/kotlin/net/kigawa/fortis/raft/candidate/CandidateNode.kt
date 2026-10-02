@@ -103,6 +103,6 @@ class CandidateNode(
             stateMachine,
             timer,
             peerIds.associateWith { RaftPeerProgress(nextIndex = nextIndex) },
-        )
+        ).also { it.initializeLeadership() }
     }
 }

@@ -2,6 +2,7 @@ package net.kigawa.fortis.raft.log.codec
 
 import net.kigawa.fortis.raft.RaftCommand
 import net.kigawa.fortis.raft.log.RaftLogEntry
+import net.kigawa.fortis.raft.log.RaftLogEntryPayload
 
 class RaftLogCodec(
     val version: Byte = 1,
@@ -12,20 +13,27 @@ class RaftLogCodec(
         val commandType: Byte
         val key: ByteArray
         val value: ByteArray?
-        when (val command = entry.command) {
-            is RaftCommand.Put -> {
-                commandType = PUT
-                key = command.key
-                value = command.value
+        when (val payload = entry.payload) {
+            is RaftLogEntryPayload.Command -> when (val command = payload.command) {
+                is RaftCommand.Put -> {
+                    commandType = PUT
+                    key = command.key
+                    value = command.value
+                }
+
+                is RaftCommand.Delete -> {
+                    commandType = DELETE
+                    key = command.key
+                    value = null
+                }
             }
 
-            is RaftCommand.Delete -> {
-                commandType = DELETE
-                key = command.key
+            RaftLogEntryPayload.NoOp -> {
+                commandType = NO_OP
+                key = byteArrayOf()
                 value = null
             }
         }
-
         val valueLength = value?.size ?: -1
         val payloadSize = key.size.toLong() + maxOf(valueLength, 0).toLong()
         require(payloadSize <= Int.MAX_VALUE - headerSize) {
@@ -79,7 +87,7 @@ class RaftLogCodec(
             )
         }
         val commandType = data[offset + 21]
-        if (commandType != PUT && commandType != DELETE) {
+        if (commandType != PUT && commandType != DELETE && commandType != NO_OP) {
             return RaftLogDecodeResult.Corrupted(
                 "Unknown Raft command type: $commandType",
             )
@@ -103,6 +111,10 @@ class RaftLogCodec(
             }
         }
 
+        if (commandType == NO_OP && (keyLength != 0 || valueLength != -1)) {
+            return RaftLogDecodeResult.Corrupted("NO_OP entry must not contain key or value")
+        }
+
         val payloadSize = keyLength.toLong() + maxOf(valueLength, 0).toLong()
         val recordSize = headerSize.toLong() + payloadSize
         if (recordSize > Int.MAX_VALUE) {
@@ -115,16 +127,16 @@ class RaftLogCodec(
         val keyStart = offset + headerSize
         val keyEnd = keyStart + keyLength
         val key = data.copyOfRange(keyStart, keyEnd)
-        val command = when (commandType) {
-            PUT -> RaftCommand.Put(
-                key,
-                data.copyOfRange(keyEnd, keyEnd + valueLength),
+        val payload = when (commandType) {
+            PUT -> RaftLogEntryPayload.Command(
+                RaftCommand.Put(key, data.copyOfRange(keyEnd, keyEnd + valueLength)),
             )
 
-            else -> RaftCommand.Delete(key)
+            DELETE -> RaftLogEntryPayload.Command(RaftCommand.Delete(key))
+            else -> RaftLogEntryPayload.NoOp
         }
         return RaftLogDecodeResult.Success(
-            RaftLogEntry(index, term, command),
+            RaftLogEntry(index, term, payload),
             recordSize.toInt(),
         )
     }
@@ -167,5 +179,6 @@ class RaftLogCodec(
         )
         const val PUT: Byte = 1
         const val DELETE: Byte = 2
+        const val NO_OP: Byte = 3
     }
 }

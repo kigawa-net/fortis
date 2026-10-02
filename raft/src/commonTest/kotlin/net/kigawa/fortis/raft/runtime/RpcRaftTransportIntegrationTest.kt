@@ -47,9 +47,9 @@ class RpcRaftTransportIntegrationTest {
             val applied = assertIs<RaftCommand.Put>(fixture.stateMachine.applied.single())
             assertContentEquals(command.key, applied.key)
             assertContentEquals(command.value, applied.value)
-            assertEquals(1L, fixture.volatileState.commitIndex)
-            assertEquals(1L, fixture.volatileState.lastApplied)
-            assertEquals(command, fixture.log.get(1)?.command)
+            assertEquals(2L, fixture.volatileState.commitIndex)
+            assertEquals(2L, fixture.volatileState.lastApplied)
+            assertEquals(command, fixture.log.get(2)?.command)
         }
     }
 

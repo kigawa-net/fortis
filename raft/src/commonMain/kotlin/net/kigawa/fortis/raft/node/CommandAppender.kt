@@ -7,6 +7,7 @@ import net.kigawa.fortis.raft.RaftPeerProgress
 import net.kigawa.fortis.raft.RaftPersistentState
 import net.kigawa.fortis.raft.log.RaftLog
 import net.kigawa.fortis.raft.log.RaftLogEntry
+import net.kigawa.fortis.raft.log.RaftLogEntryPayload
 
 class CommandAppender(
     private val persistentState: RaftPersistentState,
@@ -17,11 +18,16 @@ class CommandAppender(
     suspend fun append(
         command: RaftCommand,
         peers: Collection<RaftPeerProgress>,
+    ): RaftLogEntry = append(RaftLogEntryPayload.Command(command), peers)
+
+    suspend fun append(
+        payload: RaftLogEntryPayload,
+        peers: Collection<RaftPeerProgress>,
     ): RaftLogEntry {
         val entry = RaftLogEntry(
             index = log.lastIndex() + 1,
             term = persistentState.currentTerm,
-            command = command,
+            payload = payload,
         )
         log.append(entry)
 

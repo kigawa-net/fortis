@@ -13,6 +13,7 @@ import net.kigawa.fortis.raft.append.AppendEntriesResponse
 import net.kigawa.fortis.raft.append.AppendEntriesResponseHandler
 import net.kigawa.fortis.raft.log.RaftLog
 import net.kigawa.fortis.raft.log.RaftLogEntry
+import net.kigawa.fortis.raft.log.RaftLogEntryPayload
 import net.kigawa.fortis.raft.node.CommandAppender
 import net.kigawa.fortis.raft.node.RaftNode
 import net.kigawa.fortis.raft.node.RaftTimeoutEvent
@@ -61,6 +62,19 @@ class LeaderNode(
 
     var peerProgress: Map<String, RaftPeerProgress> = peerProgress
         private set
+
+    private var leadershipNoOp: RaftLogEntry? = null
+
+    /** Current-term commit barrier only; linearizable reads still need quorum confirmation. */
+    val isReady: Boolean
+        get() = leadershipNoOp?.let {
+            it.term == persistentState.currentTerm && volatileState.commitIndex >= it.index
+        } ?: false
+
+    internal suspend fun initializeLeadership() = mutex.withLock {
+        check(leadershipNoOp == null) { "Leadership is already initialized" }
+        leadershipNoOp = commandAppender.append(RaftLogEntryPayload.NoOp, peerProgress.values)
+    }
 
     suspend fun appendCommand(command: RaftCommand): RaftLogEntry =
         mutex.withLock {

@@ -58,6 +58,19 @@ class FileRaftLogTest {
     }
 
     @Test
+    fun restartRestoresNoOpBetweenApplicationCommands() = runTest {
+        withLogPath { path ->
+            val entries = listOf(put(1, 1), RaftLogEntry(2, 2, RaftLogEntryPayload.NoOp), delete(3, 2))
+            val writer = open(path)
+            entries.forEach { writer.append(it) }
+            val restored = open(path)
+            assertEquals(3L, restored.lastIndex())
+            entries.forEach { assertEquals(it, restored.get(it.index)) }
+            assertNull(restored.get(2)?.command)
+        }
+    }
+
+    @Test
     fun truncateMiddleRemovesEntriesFromFile() = runTest {
         withLogPath { path ->
             val log = logWithEntries(path, 4)

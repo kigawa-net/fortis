@@ -3,6 +3,7 @@ package net.kigawa.fortis.raft
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import net.kigawa.fortis.raft.log.RaftLog
+import net.kigawa.fortis.raft.log.RaftLogEntryPayload
 import net.kigawa.fortis.raft.vote.RaftVolatileState
 
 class RaftApplier(
@@ -19,7 +20,10 @@ class RaftApplier(
                 "Committed Raft log entry is missing at index $index"
             }
 
-            stateMachine.apply(entry.command)
+            when (val payload = entry.payload) {
+                is RaftLogEntryPayload.Command -> stateMachine.apply(payload.command)
+                RaftLogEntryPayload.NoOp -> Unit
+            }
             volatileState.lastApplied = index
         }
     }
