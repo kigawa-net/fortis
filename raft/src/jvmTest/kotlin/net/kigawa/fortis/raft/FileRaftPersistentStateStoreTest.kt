@@ -86,6 +86,91 @@ class FileRaftPersistentStateStoreTest {
         }
     }
 
+    @Test
+    fun completeTemporaryOnlyStateIsRecovered() = runTest {
+        withStatePath { path ->
+            val temp = path.resolveSibling("raft.state.tmp")
+            write(temp, codec.encode(RaftPersistentState(7, "node-2")))
+            assertEquals(RaftPersistentState(7, "node-2"), store(path).load())
+            assertFalse(Files.exists(temp))
+            assertEquals(RaftPersistentState(7, "node-2"), store(path).load())
+        }
+    }
+
+    @Test
+    fun incompleteTemporaryOnlyStateFailsClosed() = runTest {
+        withStatePath { path ->
+            write(path.resolveSibling("raft.state.tmp"), byteArrayOf(1, 2))
+            assertFailsWith<RaftPersistentStateCorruptionException> { store(path).load() }
+            assertFalse(Files.exists(path))
+        }
+    }
+
+    @Test
+    fun canonicalStateWinsOverCompleteOrIncompleteTemporaryFile() = runTest {
+        withStatePath { path ->
+            store(path).save(3, "node-2")
+            val temp = path.resolveSibling("raft.state.tmp")
+            write(temp, codec.encode(RaftPersistentState(4, "node-3")))
+            assertEquals(RaftPersistentState(3, "node-2"), store(path).load())
+            assertFalse(Files.exists(temp))
+            write(temp, byteArrayOf(1, 2))
+            assertEquals(RaftPersistentState(3, "node-2"), store(path).load())
+            assertFalse(Files.exists(temp))
+        }
+    }
+
+    @Test
+    fun corruptCanonicalStateDoesNotFallBackToTemporaryFile() = runTest {
+        withStatePath { path ->
+            write(path, byteArrayOf(1, 2))
+            write(path.resolveSibling("raft.state.tmp"), codec.encode(RaftPersistentState(4, "node-3")))
+            assertFailsWith<RaftPersistentStateCorruptionException> { store(path).load() }
+            assertFailsWith<RaftPersistentStateCorruptionException> { store(path).save(5, null) }
+        }
+    }
+
+    @Test
+    fun termAndVoteCannotRegressAfterReopening() = runTest {
+        withStatePath { path ->
+            store(path).save(7, "node-2")
+            assertFailsWith<IllegalArgumentException> { store(path).save(6, null) }
+            assertFailsWith<IllegalArgumentException> { store(path).save(7, "node-3") }
+            assertFailsWith<IllegalArgumentException> { store(path).save(7, null) }
+            assertEquals(RaftPersistentState(7, "node-2"), store(path).load())
+        }
+    }
+
+    @Test
+    fun legacyCanonicalRecordMigratesOnNextSave() = runTest {
+        withStatePath { path ->
+            write(path, RaftPersistentStateCodec(version = 1).encode(RaftPersistentState(3, "node-2")))
+            assertEquals(RaftPersistentState(3, "node-2"), store(path).load())
+            store(path).save(4, null)
+            assertEquals(2.toByte(), Files.readAllBytes(path)[4])
+            assertEquals(RaftPersistentState(4, null), store(path).load())
+        }
+    }
+
+    @Test
+    fun sameLengthTermCorruptionFailsClosed() = runTest {
+        withStatePath { path ->
+            store(path).save(7, "node-2")
+            write(path, Files.readAllBytes(path).also { it[12] = 6 })
+            assertFailsWith<RaftPersistentStateCorruptionException> { store(path).load() }
+            assertFailsWith<RaftPersistentStateCorruptionException> { store(path).save(8, null) }
+        }
+    }
+
+    @Test
+    fun unchecksummedTemporaryOnlyStateIsNotPromoted() = runTest {
+        withStatePath { path ->
+            write(path.resolveSibling("raft.state.tmp"), RaftPersistentStateCodec(version = 1).encode(RaftPersistentState(3, "node-2")))
+            assertFailsWith<RaftPersistentStateCorruptionException> { store(path).load() }
+            assertFalse(Files.exists(path))
+        }
+    }
+
     private fun store(path: Path) = FileRaftPersistentStateStore(
         path.toFortisFile(),
         codec,
@@ -110,6 +195,7 @@ class FileRaftPersistentStateStoreTest {
         } finally {
             withContext(NonCancellable + Dispatchers.IO) {
                 Files.deleteIfExists(path)
+                Files.deleteIfExists(path.resolveSibling("raft.state.tmp"))
                 Files.deleteIfExists(directory)
             }
         }

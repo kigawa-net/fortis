@@ -8,6 +8,12 @@ kotlin {
     linuxX64()
 
     sourceSets {
+        val nativeTest = create("nativeTest") {
+            dependsOn(commonTest.get())
+        }
+        macosArm64Test.get().dependsOn(nativeTest)
+        linuxX64Test.get().dependsOn(nativeTest)
+
         commonMain.dependencies {
             implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.1")
             implementation(project(":io"))

@@ -75,6 +75,32 @@ class RaftPersistentStateCodecTest {
         )
     }
 
+    @Test
+    fun existingVersionOneRecordRemainsReadable() {
+        val bytes = "FRST".encodeToByteArray() + byteArrayOf(
+            1, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 6,
+        ) + "node-2".encodeToByteArray()
+        assertEquals(RaftPersistentState(3, "node-2"), assertIs<RaftPersistentStateDecodeResult.Success>(codec.decode(bytes)).state)
+    }
+
+    @Test
+    fun positiveTermBitFlipIsDetectedByChecksum() {
+        val encoded = codec.encode(RaftPersistentState(3, "node-2")).also { it[12] = 2 }
+        assertIs<RaftPersistentStateDecodeResult.Corrupted>(codec.decode(encoded))
+    }
+
+    @Test
+    fun validUtf8VoteBitFlipIsDetectedByChecksum() {
+        val encoded = codec.encode(RaftPersistentState(3, "node-2")).also { it[it.size - 5] = '3'.code.toByte() }
+        assertIs<RaftPersistentStateDecodeResult.Corrupted>(codec.decode(encoded))
+    }
+
+    @Test
+    fun checksumMatchesStandardCrc32ForKnownRecord() {
+        val bytes = codec.encode(RaftPersistentState(3, null))
+        kotlin.test.assertContentEquals(byteArrayOf(0x24, 0x60, 0xeb.toByte(), 0xf3.toByte()), bytes.takeLast(4).toByteArray())
+    }
+
     private fun assertRoundTrip(state: RaftPersistentState) {
         val result = assertIs<RaftPersistentStateDecodeResult.Success>(
             codec.decode(codec.encode(state)),
