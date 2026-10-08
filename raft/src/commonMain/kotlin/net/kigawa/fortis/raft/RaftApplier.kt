@@ -21,7 +21,13 @@ class RaftApplier(
             }
 
             when (val payload = entry.payload) {
-                is RaftLogEntryPayload.Command -> stateMachine.apply(payload.command)
+                is RaftLogEntryPayload.Command -> {
+                    if (stateMachine is VersionedRaftStateMachine) {
+                        stateMachine.applyAt(payload.command, index)
+                    } else {
+                        stateMachine.apply(payload.command)
+                    }
+                }
                 RaftLogEntryPayload.NoOp -> Unit
             }
             volatileState.lastApplied = index

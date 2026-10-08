@@ -1,9 +1,23 @@
 package net.kigawa.fortis.raft
 
 import net.kigawa.fortis.storage.engine.FortisStorageEngine
+import net.kigawa.fortis.storage.engine.mvcc.VersionedFortisStorageEngine
 
 sealed interface RaftCommand {
     suspend fun execute(storageEngine: FortisStorageEngine)
+
+    // version 付き実行。対応ストレージなら版指定で適用し、非対応なら既存 execute に退避する。
+    suspend fun executeAt(storageEngine: FortisStorageEngine, version: Long) {
+        val versioned = storageEngine as? VersionedFortisStorageEngine
+        if (versioned == null) {
+            execute(storageEngine)
+            return
+        }
+        when (this) {
+            is Put -> versioned.putAt(key, value, version)
+            is Delete -> versioned.deleteAt(key, version)
+        }
+    }
     data class Put(
         val key: ByteArray,
         val value: ByteArray,
