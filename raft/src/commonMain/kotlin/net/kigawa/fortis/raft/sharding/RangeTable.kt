@@ -19,12 +19,14 @@ class RangeTable(
         require(ids.toSet().size == ids.size) { "duplicate rangeId: $ids" }
 
         val sorted = ranges.sortedWith { a, b ->
+            val aStart = a.startInclusive
+            val bStart = b.startInclusive
             when {
-                a.startInclusive == null && b.startInclusive == null -> 0
-                a.startInclusive == null -> -1
-                b.startInclusive == null -> 1
+                aStart == null && bStart == null -> 0
+                aStart == null -> -1
+                bStart == null -> 1
                 else -> {
-                    val cmp = KeyOrder.compare(a.startInclusive, b.startInclusive)
+                    val cmp = KeyOrder.compare(aStart, bStart)
                     if (cmp != 0) cmp else compareEnd(a.endExclusive, b.endExclusive)
                 }
             }

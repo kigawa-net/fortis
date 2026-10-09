@@ -30,6 +30,19 @@ class RangeTableTest {
     }
 
     @Test
+    fun exposedBoundsAreCopies() {
+        val start = byteArrayOf(0x6D)
+        val range = KeyRange("b", start, null)
+        // コンストラクタ引数の変更は内部に影響しない
+        start[0] = 0x00
+        assertTrue(range.contains(byteArrayOf(0x6D)))
+        // getter 返却値の変更は内部に影響しない
+        range.startInclusive!![0] = 0x00.toByte()
+        assertTrue(range.contains(byteArrayOf(0x6D)))
+        assertEquals("b", RangeTable(listOf(KeyRange("a", null, byteArrayOf(0x6D)), range)).route(byteArrayOf(0x6D)).rangeId)
+    }
+
+    @Test
     fun multipleRangesRouteByBinarySearch() {
         val table = RangeTable(
             listOf(

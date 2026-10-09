@@ -17,10 +17,19 @@ interface VersionedFortisStorageEngine : FortisStorageEngine {
     // 適用済み最大 version。未適用時は 0。
     suspend fun latestVersion(): Long
 
-    // 現在の最新版を指すスナップショットを返す。
+    // 現在の最新版を指すスナップショットを返す。ピン留めはしない。
     suspend fun snapshot(): MvccSnapshot
+
+    // 指定 version をピン留めし、compact から保護する。
+    // 返したスナップショットは使い終わったら release で解放すること。
+    // version は 1 以上かつ適用済み最大版以下であること。
+    suspend fun retain(version: Long): MvccSnapshot
+
+    // retain で取得したスナップショットを解放する。未保持の解放は失敗する。
+    suspend fun release(snapshot: MvccSnapshot)
 
     // 各キーについて upToVersion 以下の履歴のうち最新1件だけ残す。
     // 最新読みの結果は変わらない。
+    // ピン留め中の最小 version 以上の履歴を破壊する場合は IllegalArgumentException。
     suspend fun compact(upToVersion: Long)
 }

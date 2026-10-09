@@ -28,6 +28,8 @@ class VersionedEntry(
 class MemoryMvccStorageEngine : VersionedFortisStorageEngine {
     private val histories = mutableMapOf<ByteArrayKey, MutableList<VersionedEntry>>()
     private var latest = 0L
+    // ピン留め中の version と参照数
+    private val pins = mutableMapOf<Long, Int>()
     private val mutex = Mutex()
 
     override suspend fun get(key: ByteArray): ByteArray? = mutex.withLock {
@@ -62,7 +64,33 @@ class MemoryMvccStorageEngine : VersionedFortisStorageEngine {
 
     override suspend fun snapshot(): MvccSnapshot = mutex.withLock { MvccSnapshot(latest) }
 
+    override suspend fun retain(version: Long): MvccSnapshot = mutex.withLock {
+        require(version in 1..latest) {
+            "cannot retain version $version (latest=$latest)"
+        }
+        pins[version] = (pins[version] ?: 0) + 1
+        MvccSnapshot(version)
+    }
+
+    override suspend fun release(snapshot: MvccSnapshot) {
+        mutex.withLock {
+            val count = pins[snapshot.version]
+            check(count != null && count > 0) {
+                "snapshot version ${snapshot.version} is not retained"
+            }
+            if (count == 1) {
+                pins.remove(snapshot.version)
+            } else {
+                pins[snapshot.version] = count - 1
+            }
+        }
+    }
+
     override suspend fun compact(upToVersion: Long) = mutex.withLock {
+        val floor = pins.keys.minOrNull()
+        require(floor == null || upToVersion < floor) {
+            "compact($upToVersion) would destroy retained snapshot at version $floor"
+        }
         for ((_, history) in histories) {
             val newer = history.filter { it.version > upToVersion }
             val older = history.filter { it.version <= upToVersion }

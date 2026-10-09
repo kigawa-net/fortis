@@ -4,6 +4,7 @@ import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 
 class MemoryMvccStorageEngineTest {
@@ -48,5 +49,36 @@ class MemoryMvccStorageEngineTest {
         assertContentEquals(byteArrayOf(20), storage.get(key))
         assertContentEquals(byteArrayOf(20), storage.getAt(key, 2))
         assertEquals(2L, storage.latestVersion())
+    }
+
+    @Test
+    fun retainedSnapshotSurvivesCompactAttempt() = runTest {
+        val storage = MemoryMvccStorageEngine()
+        val key = byteArrayOf(1)
+
+        storage.putAt(key, byteArrayOf(10), 1)
+        val pinned = storage.retain(1)
+        storage.putAt(key, byteArrayOf(20), 2)
+
+        // ピン留め中の履歴を破壊する compact は拒否される
+        assertFailsWith<IllegalArgumentException> {
+            storage.compact(2)
+        }
+        assertContentEquals(byteArrayOf(10), storage.getAt(key, pinned.version))
+
+        storage.release(pinned)
+
+        // 解放後は compact できる
+        storage.compact(2)
+        assertContentEquals(byteArrayOf(20), storage.getAt(key, 2))
+    }
+
+    @Test
+    fun releaseWithoutRetainFails() = runTest {
+        val storage = MemoryMvccStorageEngine()
+        storage.putAt(byteArrayOf(1), byteArrayOf(10), 1)
+        assertFailsWith<IllegalStateException> {
+            storage.release(MvccSnapshot(1))
+        }
     }
 }

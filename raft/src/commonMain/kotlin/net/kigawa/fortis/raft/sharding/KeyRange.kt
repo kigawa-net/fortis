@@ -11,13 +11,19 @@ class KeyRange(
     startInclusive: ByteArray?,
     endExclusive: ByteArray?,
 ) {
-    val startInclusive: ByteArray? = startInclusive?.copyOf()
-    val endExclusive: ByteArray? = endExclusive?.copyOf()
+    // 内部状態は外部に公開しない。getter は毎回コピーを返す。
+    private val startValue: ByteArray? = startInclusive?.copyOf()
+    private val endValue: ByteArray? = endExclusive?.copyOf()
+
+    val startInclusive: ByteArray?
+        get() = startValue?.copyOf()
+    val endExclusive: ByteArray?
+        get() = endValue?.copyOf()
 
     init {
         require(rangeId.isNotEmpty()) { "rangeId must not be empty" }
-        val start = this.startInclusive
-        val end = this.endExclusive
+        val start = startValue
+        val end = endValue
         if (start != null && end != null) {
             require(KeyOrder.compare(start, end) < 0) {
                 "empty range: start must be smaller than end (rangeId=$rangeId)"
@@ -27,9 +33,9 @@ class KeyRange(
 
     /** [key] がこのレンジに属するかを返す。 */
     fun contains(key: ByteArray): Boolean {
-        val start = startInclusive
+        val start = startValue
         if (start != null && KeyOrder.compare(key, start) < 0) return false
-        val end = endExclusive
+        val end = endValue
         if (end != null && KeyOrder.compare(key, end) >= 0) return false
         return true
     }
@@ -38,15 +44,15 @@ class KeyRange(
         if (this === other) return true
         if (other !is KeyRange) return false
         if (rangeId != other.rangeId) return false
-        if (!startInclusive.contentEqualsNullable(other.startInclusive)) return false
-        if (!endExclusive.contentEqualsNullable(other.endExclusive)) return false
+        if (!startValue.contentEqualsNullable(other.startValue)) return false
+        if (!endValue.contentEqualsNullable(other.endValue)) return false
         return true
     }
 
     override fun hashCode(): Int {
         var result = rangeId.hashCode()
-        result = 31 * result + (startInclusive?.contentHashCode() ?: 0)
-        result = 31 * result + (endExclusive?.contentHashCode() ?: 0)
+        result = 31 * result + (startValue?.contentHashCode() ?: 0)
+        result = 31 * result + (endValue?.contentHashCode() ?: 0)
         return result
     }
 

@@ -1,15 +1,12 @@
 package net.kigawa.fortis.raft.sharding
 
-import kotlinx.coroutines.test.runTest
 import net.kigawa.fortis.raft.RaftCommand
-import net.kigawa.fortis.storage.engine.mvcc.MemoryMvccStorageEngine
 import kotlin.test.Test
-import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
-import kotlin.test.assertNull
 
-// 2レンジ構成でグループ毎の独立性を検証する
+// ルーターはルーティング計算専用であり、ストレージ I/O を行わない。
+// 書き込みは RaftRuntime.propose、読み取りは linearizableRead 経由とする（#23 以降）。
 class MultiRaftRouterTest {
     private fun router(): MultiRaftRouter {
         val table = RangeTable(
@@ -21,46 +18,19 @@ class MultiRaftRouterTest {
         return MultiRaftRouter(
             table,
             mapOf(
-                "g1" to GroupHandle("g1", MemoryMvccStorageEngine()),
-                "g2" to GroupHandle("g2", MemoryMvccStorageEngine()),
+                "g1" to GroupHandle("g1"),
+                "g2" to GroupHandle("g2"),
             )
         )
     }
 
     @Test
-    fun putGoesToOwningGroupOnly() = runTest {
+    fun routeResolvesOwningGroup() {
         val router = router()
-        val keyA = byteArrayOf(0x61) // 'a' -> g1
-        val keyM = byteArrayOf(0x6D) // 'm' -> g2
-
-        router.put(keyA, byteArrayOf(1))
-        router.put(keyM, byteArrayOf(2))
-
-        // 正しいグループに届いている
-        assertContentEquals(byteArrayOf(1), router.groups.getValue("g1").storage.get(keyA))
-        assertContentEquals(byteArrayOf(2), router.groups.getValue("g2").storage.get(keyM))
-        // 他グループには見えない
-        assertNull(router.groups.getValue("g2").storage.get(keyA))
-        assertNull(router.groups.getValue("g1").storage.get(keyM))
-    }
-
-    @Test
-    fun snapshotReadsAreIndependentPerGroup() = runTest {
-        val router = router()
-        val keyA = byteArrayOf(0x61)
-        val keyM = byteArrayOf(0x6D)
-
-        // グループローカルな version 系列で適用する
-        router.applyAt("g1", RaftCommand.Put(keyA, byteArrayOf(10)), 1)
-        router.applyAt("g1", RaftCommand.Put(keyA, byteArrayOf(11)), 2)
-        router.applyAt("g2", RaftCommand.Put(keyM, byteArrayOf(20)), 1)
-
-        assertContentEquals(byteArrayOf(10), router.getAt(keyA, 1))
-        assertContentEquals(byteArrayOf(11), router.getAt(keyA, 2))
-        // g2 の version 1 が g1 の読みに混ざらない
-        assertContentEquals(byteArrayOf(20), router.getAt(keyM, 1))
-        assertEquals(2L, router.groups.getValue("g1").storage.latestVersion())
-        assertEquals(1L, router.groups.getValue("g2").storage.latestVersion())
+        assertEquals("g1", router.route(byteArrayOf(0x61)).rangeId)
+        assertEquals("g2", router.route(byteArrayOf(0x6D)).rangeId)
+        assertEquals("g1", router.rangeIdOf(byteArrayOf(0x61)))
+        assertEquals("g2", router.rangeIdOf(byteArrayOf(0x6D)))
     }
 
     @Test
@@ -81,7 +51,7 @@ class MultiRaftRouterTest {
         assertFailsWith<IllegalArgumentException> {
             MultiRaftRouter(
                 table,
-                mapOf("g1" to GroupHandle("g1", MemoryMvccStorageEngine())),
+                mapOf("g1" to GroupHandle("g1")),
             )
         }
     }
