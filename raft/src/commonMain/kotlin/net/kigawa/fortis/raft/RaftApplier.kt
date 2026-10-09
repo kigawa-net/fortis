@@ -4,12 +4,21 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import net.kigawa.fortis.raft.log.RaftLog
 import net.kigawa.fortis.raft.log.RaftLogEntryPayload
+import net.kigawa.fortis.raft.metrics.FortisMetrics
+import net.kigawa.fortis.raft.metrics.RaftMetrics
 import net.kigawa.fortis.raft.vote.RaftVolatileState
 
+/**
+ * コミット済みエントリを状態機械へ適用する。
+ *
+ * @param metrics 非 null なら適用成功ごとに [RaftMetrics.APPLIED_ENTRIES] を
+ * 加算し、[RaftMetrics.LAST_APPLIED] を更新する。
+ */
 class RaftApplier(
     val volatileState: RaftVolatileState,
     val log: RaftLog,
     val stateMachine: RaftStateMachine,
+    val metrics: FortisMetrics? = null,
 ) {
     private val mutex = Mutex()
 
@@ -31,6 +40,8 @@ class RaftApplier(
                 RaftLogEntryPayload.NoOp -> Unit
             }
             volatileState.lastApplied = index
+            metrics?.incrementCounter(RaftMetrics.APPLIED_ENTRIES)
+            metrics?.setGauge(RaftMetrics.LAST_APPLIED, index)
         }
     }
 }

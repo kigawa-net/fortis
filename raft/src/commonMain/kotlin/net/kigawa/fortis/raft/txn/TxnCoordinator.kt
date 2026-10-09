@@ -1,5 +1,7 @@
 package net.kigawa.fortis.raft.txn
 
+import net.kigawa.fortis.raft.metrics.FortisMetrics
+import net.kigawa.fortis.raft.metrics.RaftMetrics
 import net.kigawa.fortis.storage.engine.ByteArrayKey
 
 /**
@@ -8,10 +10,14 @@ import net.kigawa.fortis.storage.engine.ByteArrayKey
  * スナップショット分離で読み、prepare（全参加者）→全 OK なら commit、
  * 1つでも NG なら abort する。単一グループも参加者1名の 2PC として扱う。
  * 記録はインメモリのみであり、Raft ログへの永続化は将来課題とする。
+ *
+ * @param metrics 非 null なら commit/abort の確定時に
+ * [RaftMetrics.TXN_COMMITTED]/[RaftMetrics.TXN_ABORTED] を加算する。
  */
 class TxnCoordinator(
     participants: Map<String, TxnParticipant>,
     private val idGenerator: TxnIdGenerator = TxnIdGenerator(),
+    private val metrics: FortisMetrics? = null,
 ) {
     val participants: Map<String, TxnParticipant> = participants.toMap()
     private val records: MutableMap<TxnId, TxnRecord> = mutableMapOf()
@@ -82,6 +88,7 @@ class TxnCoordinator(
             val groups = record.writeGroups().toList()
             if (groups.isEmpty()) {
                 record.state = TxnState.COMMITTED
+                metrics?.incrementCounter(RaftMetrics.TXN_COMMITTED)
                 return true
             }
             record.state = TxnState.PREPARING
@@ -91,6 +98,7 @@ class TxnCoordinator(
                 if (!participant.prepare(record)) {
                     for (done in prepared) done.abort(record)
                     record.state = TxnState.ABORTED
+                    metrics?.incrementCounter(RaftMetrics.TXN_ABORTED)
                     return false
                 }
                 prepared.add(participant)
@@ -98,6 +106,7 @@ class TxnCoordinator(
             record.state = TxnState.PREPARED
             for (participant in prepared) participant.commit(record)
             record.state = TxnState.COMMITTED
+            metrics?.incrementCounter(RaftMetrics.TXN_COMMITTED)
             return true
         }
 
@@ -107,6 +116,7 @@ class TxnCoordinator(
                 participants[groupId]?.abort(record)
             }
             record.state = TxnState.ABORTED
+            metrics?.incrementCounter(RaftMetrics.TXN_ABORTED)
         }
 
         private fun requireParticipant(groupId: String): TxnParticipant =
@@ -128,6 +138,7 @@ class TxnCoordinator(
                     participants[groupId]?.abort(record)
                 }
                 record.state = TxnState.ABORTED
+                metrics?.incrementCounter(RaftMetrics.TXN_ABORTED)
                 count += 1
             }
         }
