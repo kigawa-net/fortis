@@ -1,0 +1,80 @@
+name: Gradle CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  jvm-tests:
+    name: JVM tests (io / storage-engine / raft)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 25 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+      - name: Run JVM tests
+        run: ./gradlew :io:jvmTest :storage-engine:jvmTest :raft:jvmTest --console=plain
+      - name: Upload test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jvm-test-reports
+          path: |
+            io/build/reports/tests/
+            storage-engine/build/reports/tests/
+            raft/build/reports/tests/
+
+  linux-native:
+    name: Linux native (raft compile + test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 25 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+      - name: Compile and run Linux native tests
+        run: ./gradlew :raft:compileTestKotlinLinuxX64 :raft:linuxX64Test --console=plain
+      - name: Upload test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-native-test-reports
+          path: raft/build/reports/tests/
+
+  macos-native:
+    name: macOS ARM64 native tests (raft)
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 25 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+      - name: Run macOS ARM64 native tests
+        run: ./gradlew :raft:macosArm64Test --console=plain
+      - name: Upload test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-native-test-reports
+          path: raft/build/reports/tests/
