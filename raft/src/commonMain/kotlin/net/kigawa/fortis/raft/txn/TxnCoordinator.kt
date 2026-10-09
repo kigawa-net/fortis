@@ -53,8 +53,10 @@ class TxnCoordinator(
             }
             val snapshot = record.snapshotOf(groupId)
             val observed = participant.engine.getAt(key.copyOf(), snapshot)?.copyOf()
-            record.readSet.getOrPut(groupId) { mutableMapOf() }
-                .putIfAbsent(wrapped, observed?.copyOf())
+            val reads = record.readSet.getOrPut(groupId) { mutableMapOf() }
+            if (!reads.containsKey(wrapped)) {
+                reads[wrapped] = observed?.copyOf()
+            }
             return observed?.copyOf()
         }
 
