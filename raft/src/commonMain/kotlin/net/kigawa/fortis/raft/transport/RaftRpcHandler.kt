@@ -19,8 +19,13 @@ class RaftRpcHandler(
             runtime.handleAppendEntries(message.request),
         )
 
+        is RaftRpcMessage.InstallSnapshot -> RaftRpcMessage.InstallSnapshotResult(
+            runtime.handleInstallSnapshot(message.request),
+        )
+
         is RaftRpcMessage.RequestVoteResult,
         is RaftRpcMessage.AppendEntriesResult,
+        is RaftRpcMessage.InstallSnapshotResult,
         -> throw RaftTransportException(
             "Unexpected RPC request: ${message::class.simpleName}",
         )

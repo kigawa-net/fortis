@@ -2,6 +2,8 @@ package net.kigawa.fortis.raft.transport
 
 import net.kigawa.fortis.raft.append.AppendEntriesRequest
 import net.kigawa.fortis.raft.append.AppendEntriesResponse
+import net.kigawa.fortis.raft.snapshot.InstallSnapshotRequest
+import net.kigawa.fortis.raft.snapshot.InstallSnapshotResponse
 import net.kigawa.fortis.raft.transport.codec.RaftRpcCodec
 import net.kigawa.fortis.raft.transport.codec.RaftRpcDecodeResult
 import net.kigawa.fortis.raft.transport.codec.RaftRpcMessage
@@ -29,6 +31,16 @@ class RpcRaftTransport(
         val response = request(peerId, RaftRpcMessage.AppendEntries(request))
     ) {
         is RaftRpcMessage.AppendEntriesResult -> response.response
+        else -> throw unexpectedResponse(response)
+    }
+
+    override suspend fun installSnapshot(
+        peerId: String,
+        request: InstallSnapshotRequest,
+    ): InstallSnapshotResponse = when (
+        val response = request(peerId, RaftRpcMessage.InstallSnapshot(request))
+    ) {
+        is RaftRpcMessage.InstallSnapshotResult -> response.response
         else -> throw unexpectedResponse(response)
     }
 

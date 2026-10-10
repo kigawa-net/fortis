@@ -24,20 +24,38 @@ import net.kigawa.fortis.raft.leader.LeaderNode
 import net.kigawa.fortis.raft.log.RaftLogEntry
 import net.kigawa.fortis.raft.node.RaftNode
 import net.kigawa.fortis.raft.node.RaftTimeoutEvent
+import net.kigawa.fortis.raft.snapshot.InstallSnapshotRequest
+import net.kigawa.fortis.raft.snapshot.InstallSnapshotResponse
+import net.kigawa.fortis.raft.snapshot.InstallSnapshotHandler
+import net.kigawa.fortis.raft.snapshot.RaftSnapshotApplier
+import net.kigawa.fortis.raft.snapshot.RaftSnapshotProvider
+import net.kigawa.fortis.raft.snapshot.SnapshotMetadata
 import net.kigawa.fortis.raft.transport.RaftTransport
 import net.kigawa.fortis.raft.transport.RaftTransportException
 import net.kigawa.fortis.raft.vote.RequestVoteRequest
 import net.kigawa.fortis.raft.vote.RequestVoteResponse
+import kotlin.coroutines.cancellation.CancellationException
 
 class RaftRuntime(
     initialNode: RaftNode,
     private val transport: RaftTransport,
     proposalCoroutineContext: CoroutineContext = Dispatchers.Default,
+    private val snapshotApplier: RaftSnapshotApplier = RaftSnapshotApplier.NoOp,
+    private val snapshotProvider: RaftSnapshotProvider? = null,
 ) {
     private val mutex = Mutex()
     private val peerRpcMutexes = initialNode.peerIds.associateWith { Mutex() }
     private var node: RaftNode = initialNode
     private val appendAttempts = mutableMapOf<String, AppendAttempt>()
+    private val snapshotAttempts = mutableMapOf<String, SnapshotAttempt>()
+    private val snapshotHandler = InstallSnapshotHandler(
+        initialNode.persistentState,
+        initialNode.persistentStateStore,
+        initialNode.volatileState,
+        initialNode.log,
+        initialNode.timer,
+        snapshotApplier,
+    )
     private val proposalJob = SupervisorJob(proposalCoroutineContext[Job])
     private val proposalScope = CoroutineScope(proposalCoroutineContext + proposalJob)
     private val proposals = mutableMapOf<Long, PendingProposal>()
@@ -77,6 +95,24 @@ class RaftRuntime(
         node = result.node
         settlePending()
         result.value
+    }
+
+    /**
+     * 単一メッセージの InstallSnapshot 要求を受け付ける。
+     * 既存 [InstallSnapshotHandler] に委譲し、有効なリーダー任期なら
+     * フォロワーへ遷移する。チャンク分割転送とスナップショット自体の
+     * 永続化は将来課題。
+     */
+    suspend fun handleInstallSnapshot(
+        request: InstallSnapshotRequest,
+    ): InstallSnapshotResponse = mutex.withLock {
+        val previousTerm = node.persistentState.currentTerm
+        val response = snapshotHandler.handle(request)
+        if (request.term >= previousTerm && node !is FollowerNode) {
+            node = node.follower()
+        }
+        settlePending()
+        response
     }
 
     suspend fun onElectionTimeout() {
@@ -280,33 +316,104 @@ class RaftRuntime(
         round: LeaderRound,
         peerId: String,
     ) {
+        // 同一呼び出し内で同一境界の再送を抑止する暫定ガード。
+        // base-index 未対応の現状では再送が収束しないため、2回目以降は
+        // AppendEntries で巻き戻す（リーダーログは未圧縮のため到達可能）。
+        // 呼び出しごとに作り直すため、次回 replicate での再送は妨げない。
+        var lastSentSnapshotIndex: Long? = null
         while (true) {
-            val attempt = mutex.withLock {
+            val needed = mutex.withLock {
                 if (!isCurrentLeader(round)) return
-                AppendAttempt(round, round.leader.createAppendEntries(peerId)).also {
-                    appendAttempts[peerId] = it
-                }
+                snapshotProvider?.let { round.leader.snapshotFor(peerId) }
             }
-            val response = try {
-                transport.appendEntries(peerId, attempt.request)
-            } catch (_: RaftTransportException) {
-                return
+            val metadata = if (needed != null && needed.lastIncludedIndex == lastSentSnapshotIndex) {
+                null
+            } else {
+                needed
             }
-            val retry = mutex.withLock {
-                if (observeHigherTerm(response.term)) return@withLock false
-                if (
-                    !isCurrentLeader(attempt.round) ||
-                    appendAttempts[peerId] !== attempt ||
-                    response.term != attempt.request.term
-                ) {
-                    return@withLock false
-                }
-                appendAttempts.remove(peerId)
-                node = round.leader.handleAppendEntriesResponse(peerId, attempt.request, response)
-                settlePending()
-                !response.success && isCurrentLeader(round)
+            if (metadata != null) {
+                lastSentSnapshotIndex = metadata.lastIncludedIndex
+                if (!replicateSnapshot(round, peerId, metadata)) return
+            } else {
+                if (!replicateAppend(round, peerId)) return
             }
-            if (!retry) return
+        }
+    }
+
+    /**
+     * InstallSnapshot を1往復送る。継続する場合に真を返す。
+     * 送信は mutex を保持せずに行い、[snapshotProvider] の取得失敗時は
+     * 複製を打ち切る（呼び出し側の供給責務）。
+     */
+    private suspend fun replicateSnapshot(
+        round: LeaderRound,
+        peerId: String,
+        metadata: SnapshotMetadata,
+    ): Boolean {
+        val provider = snapshotProvider ?: return false
+        val data = try {
+            provider.snapshotData(metadata)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            return false
+        }
+        val attempt = mutex.withLock {
+            if (!isCurrentLeader(round)) return false
+            SnapshotAttempt(round, round.leader.createInstallSnapshot(peerId, data)).also {
+                snapshotAttempts[peerId] = it
+            }
+        }
+        val response = try {
+            transport.installSnapshot(peerId, attempt.request)
+        } catch (_: RaftTransportException) {
+            return false
+        }
+        return mutex.withLock {
+            if (observeHigherTerm(response.term)) return@withLock false
+            if (
+                !isCurrentLeader(attempt.round) ||
+                snapshotAttempts[peerId] !== attempt ||
+                response.term != attempt.request.term
+            ) {
+                return@withLock false
+            }
+            snapshotAttempts.remove(peerId)
+            node = round.leader.handleInstallSnapshotResponse(peerId, attempt.request, response)
+            settlePending()
+            isCurrentLeader(round)
+        }
+    }
+
+    /** AppendEntries を1往復送る。継続する場合に真を返す。 */
+    private suspend fun replicateAppend(
+        round: LeaderRound,
+        peerId: String,
+    ): Boolean {
+        val attempt = mutex.withLock {
+            if (!isCurrentLeader(round)) return false
+            AppendAttempt(round, round.leader.createAppendEntries(peerId)).also {
+                appendAttempts[peerId] = it
+            }
+        }
+        val response = try {
+            transport.appendEntries(peerId, attempt.request)
+        } catch (_: RaftTransportException) {
+            return false
+        }
+        return mutex.withLock {
+            if (observeHigherTerm(response.term)) return@withLock false
+            if (
+                !isCurrentLeader(attempt.round) ||
+                appendAttempts[peerId] !== attempt ||
+                response.term != attempt.request.term
+            ) {
+                return@withLock false
+            }
+            appendAttempts.remove(peerId)
+            node = round.leader.handleAppendEntriesResponse(peerId, attempt.request, response)
+            settlePending()
+            !response.success && isCurrentLeader(round)
         }
     }
 
@@ -330,6 +437,7 @@ class RaftRuntime(
         node.persistentState.votedFor = null
         node = node.follower()
         appendAttempts.clear()
+        snapshotAttempts.clear()
         settlePending()
         node.timer.reset(RaftTimeoutEvent.Election)
         return true
@@ -461,5 +569,10 @@ class RaftRuntime(
     private class AppendAttempt(
         val round: LeaderRound,
         val request: AppendEntriesRequest,
+    )
+
+    private class SnapshotAttempt(
+        val round: LeaderRound,
+        val request: InstallSnapshotRequest,
     )
 }

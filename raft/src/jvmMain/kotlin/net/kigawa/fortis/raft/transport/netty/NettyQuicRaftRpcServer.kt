@@ -150,8 +150,10 @@ class NettyQuicRaftRpcServer(
     private fun claimedPeerId(message: RaftRpcMessage): String = when (message) {
         is RaftRpcMessage.RequestVote -> message.request.candidateId
         is RaftRpcMessage.AppendEntries -> message.request.leaderId
+        is RaftRpcMessage.InstallSnapshot -> message.request.leaderId
         is RaftRpcMessage.RequestVoteResult,
         is RaftRpcMessage.AppendEntriesResult,
+        is RaftRpcMessage.InstallSnapshotResult,
         -> throw RaftTransportException("Raft RPC server received a response message")
     }
 

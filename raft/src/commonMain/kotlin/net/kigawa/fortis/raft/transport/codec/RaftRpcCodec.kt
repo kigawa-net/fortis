@@ -5,6 +5,9 @@ import net.kigawa.fortis.raft.append.AppendEntriesRequest
 import net.kigawa.fortis.raft.append.AppendEntriesResponse
 import net.kigawa.fortis.raft.log.RaftLogEntry
 import net.kigawa.fortis.raft.log.RaftLogEntryPayload
+import net.kigawa.fortis.raft.snapshot.InstallSnapshotRequest
+import net.kigawa.fortis.raft.snapshot.InstallSnapshotResponse
+import net.kigawa.fortis.raft.snapshot.SnapshotMetadata
 import net.kigawa.fortis.raft.vote.RequestVoteRequest
 import net.kigawa.fortis.raft.vote.RequestVoteResponse
 
@@ -44,6 +47,16 @@ class RaftRpcCodec(
             is RaftRpcMessage.AppendEntriesResult -> {
                 type = RaftRpcMessageType.APPEND_ENTRIES_RESPONSE
                 encodeAppendEntriesResponse(message.response)
+            }
+
+            is RaftRpcMessage.InstallSnapshot -> {
+                type = RaftRpcMessageType.INSTALL_SNAPSHOT_REQUEST
+                encodeInstallSnapshot(message.request)
+            }
+
+            is RaftRpcMessage.InstallSnapshotResult -> {
+                type = RaftRpcMessageType.INSTALL_SNAPSHOT_RESPONSE
+                encodeInstallSnapshotResponse(message.response)
             }
         }
         require(payload.size <= maxPayloadLength) {
@@ -180,6 +193,40 @@ class RaftRpcCodec(
         }
     }
 
+    /**
+     * 単一メッセージの InstallSnapshot 要求を符号化する。
+     * チャンク分割転送は将来課題とし、[data] 全体を1フレームに載せる。
+     */
+    private fun encodeInstallSnapshot(request: InstallSnapshotRequest): ByteArray {
+        requireTerm(request.term)
+        val leaderId = request.leaderId.encodeToByteArray()
+        val payloadSize = 32L + leaderId.size + request.data.size
+        require(payloadSize <= Int.MAX_VALUE) { "InstallSnapshot payload is too large" }
+        val payload = ByteArray(requirePayloadSize(payloadSize.toInt()))
+        var cursor = 0
+        writeLong(payload, cursor, request.term)
+        cursor += 8
+        writeInt(payload, cursor, leaderId.size)
+        cursor += 4
+        leaderId.copyInto(payload, cursor)
+        cursor += leaderId.size
+        writeLong(payload, cursor, request.metadata.lastIncludedIndex)
+        cursor += 8
+        writeLong(payload, cursor, request.metadata.lastIncludedTerm)
+        cursor += 8
+        writeInt(payload, cursor, request.data.size)
+        cursor += 4
+        request.data.copyInto(payload, cursor)
+        return payload
+    }
+
+    private fun encodeInstallSnapshotResponse(response: InstallSnapshotResponse): ByteArray {
+        requireTerm(response.term)
+        return ByteArray(requirePayloadSize(8)).also { payload ->
+            writeLong(payload, 0, response.term)
+        }
+    }
+
     private fun entryEncodedSize(entry: RaftLogEntry): Int {
         val valueLength = when (val command = entry.command) {
             is RaftCommand.Put -> command.value.size
@@ -244,7 +291,10 @@ class RaftRpcCodec(
         RaftRpcMessageType.REQUEST_VOTE_REQUEST -> decodeRequestVote(data, start, end)
         RaftRpcMessageType.REQUEST_VOTE_RESPONSE -> decodeRequestVoteResponse(data, start, end)
         RaftRpcMessageType.APPEND_ENTRIES_REQUEST -> decodeAppendEntries(data, start, end)
-        else -> decodeAppendEntriesResponse(data, start, end)
+        RaftRpcMessageType.APPEND_ENTRIES_RESPONSE -> decodeAppendEntriesResponse(data, start, end)
+        RaftRpcMessageType.INSTALL_SNAPSHOT_REQUEST -> decodeInstallSnapshot(data, start, end)
+        RaftRpcMessageType.INSTALL_SNAPSHOT_RESPONSE -> decodeInstallSnapshotResponse(data, start, end)
+        else -> corrupted("Unknown Raft RPC message type: $type")
     }
 
     private fun decodeRequestVote(data: ByteArray, start: Int, end: Int): PayloadResult {
@@ -356,6 +406,70 @@ class RaftRpcCodec(
             ?: return corrupted("Invalid success value")
         return PayloadResult.Success(
             RaftRpcMessage.AppendEntriesResult(AppendEntriesResponse(term, success)),
+        )
+    }
+
+    private fun decodeInstallSnapshot(
+        data: ByteArray,
+        start: Int,
+        end: Int,
+    ): PayloadResult {
+        if (end - start < MIN_SNAPSHOT_SIZE) return corrupted("Truncated InstallSnapshot payload")
+        var cursor = start
+        val term = readLong(data, cursor)
+        cursor += 8
+        val leaderLength = readInt(data, cursor)
+        cursor += 4
+        if (term < 0) return corrupted("Invalid InstallSnapshot term: $term")
+        if (leaderLength < 0) return corrupted("Invalid leader ID length: $leaderLength")
+        if (leaderLength.toLong() > end.toLong() - cursor - (MIN_SNAPSHOT_SIZE - 12L)) {
+            return corrupted("Invalid InstallSnapshot payload length")
+        }
+        val leaderEnd = cursor + leaderLength
+        val leaderId = decodeString(data, cursor, leaderEnd)
+            ?: return corrupted("Leader ID is not valid UTF-8")
+        cursor = leaderEnd
+        val lastIncludedIndex = readLong(data, cursor)
+        cursor += 8
+        val lastIncludedTerm = readLong(data, cursor)
+        cursor += 8
+        val dataLength = readInt(data, cursor)
+        cursor += 4
+        if (lastIncludedIndex <= 0) {
+            return corrupted("Invalid last included index: $lastIncludedIndex")
+        }
+        if (lastIncludedTerm < 0) {
+            return corrupted("Invalid last included term: $lastIncludedTerm")
+        }
+        if (dataLength < 0) return corrupted("Invalid snapshot data length: $dataLength")
+        if (dataLength.toLong() != end.toLong() - cursor) {
+            return corrupted("Invalid InstallSnapshot payload length")
+        }
+        return PayloadResult.Success(
+            RaftRpcMessage.InstallSnapshot(
+                InstallSnapshotRequest(
+                    term,
+                    leaderId,
+                    SnapshotMetadata(
+                        lastIncludedIndex,
+                        lastIncludedTerm,
+                    ),
+                    data.copyOfRange(cursor, end),
+                ),
+            ),
+        )
+    }
+
+    private fun decodeInstallSnapshotResponse(
+        data: ByteArray,
+        start: Int,
+        end: Int,
+    ): PayloadResult {
+        if (end - start != 8) return corrupted("Invalid InstallSnapshot response length")
+        val term = readLong(data, start)
+        if (term < 0) return corrupted("Invalid InstallSnapshot response term: $term")
+        return PayloadResult.Success(
+            RaftRpcMessage.InstallSnapshotResult(InstallSnapshotResponse(term)),
         )
     }
 
@@ -482,6 +596,7 @@ class RaftRpcCodec(
         const val DEFAULT_MAX_PAYLOAD_LENGTH: Int = 16 * 1024 * 1024
         private const val HEADER_SIZE = 10
         private const val MIN_ENTRY_SIZE = 25
+        private const val MIN_SNAPSHOT_SIZE = 32
         private const val PUT: Byte = 1
         private const val DELETE: Byte = 2
         private const val NO_OP: Byte = 3
@@ -496,6 +611,8 @@ class RaftRpcCodec(
             RaftRpcMessageType.REQUEST_VOTE_RESPONSE,
             RaftRpcMessageType.APPEND_ENTRIES_REQUEST,
             RaftRpcMessageType.APPEND_ENTRIES_RESPONSE,
+            RaftRpcMessageType.INSTALL_SNAPSHOT_REQUEST,
+            RaftRpcMessageType.INSTALL_SNAPSHOT_RESPONSE,
         )
     }
 }
