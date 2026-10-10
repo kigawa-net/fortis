@@ -24,6 +24,10 @@ interface VersionedFortisStorageEngine : FortisStorageEngine {
     // 現在の最新版を指すスナップショットを返す。ピン留めはしない。
     suspend fun snapshot(): MvccSnapshot
 
+    // 現在の最新版をスナップショット取得と同時にピン留めする。
+    // snapshot()→retain() の途中で compact が入る隙間を作らない。
+    suspend fun retainLatest(): MvccSnapshot
+
     // 指定 version をピン留めし、compact から保護する。
     // 返したスナップショットは使い終わったら release で解放すること。
     // version は 1 以上かつ適用済み最大版以下であること。

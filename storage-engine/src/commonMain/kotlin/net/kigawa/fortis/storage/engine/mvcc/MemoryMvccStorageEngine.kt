@@ -30,6 +30,8 @@ class MemoryMvccStorageEngine : VersionedFortisStorageEngine {
     private var latest = 0L
     // ピン留め中の version と参照数
     private val pins = mutableMapOf<Long, Int>()
+    // compact 済みの上限。retain はこの版以下を拒否する。
+    private var compactedFloor = 0L
     private val mutex = Mutex()
 
     override suspend fun get(key: ByteArray): ByteArray? = mutex.withLock {
@@ -72,8 +74,20 @@ class MemoryMvccStorageEngine : VersionedFortisStorageEngine {
         require(version in 1..latest) {
             "cannot retain version $version (latest=$latest)"
         }
+        require(version > compactedFloor) {
+            "cannot retain version $version lost to compact($compactedFloor)"
+        }
         pins[version] = (pins[version] ?: 0) + 1
         MvccSnapshot(version)
+    }
+
+    override suspend fun retainLatest(): MvccSnapshot = mutex.withLock {
+        check(latest >= 1) { "nothing to retain (latest=$latest)" }
+        check(latest > compactedFloor) {
+            "latest version $latest lost to compact($compactedFloor)"
+        }
+        pins[latest] = (pins[latest] ?: 0) + 1
+        MvccSnapshot(latest)
     }
 
     override suspend fun release(snapshot: MvccSnapshot) {
@@ -104,6 +118,7 @@ class MemoryMvccStorageEngine : VersionedFortisStorageEngine {
             history.addAll(newer + keep)
             history.sortBy { it.version }
         }
+        if (upToVersion > compactedFloor) compactedFloor = upToVersion
     }
 
     // 呼び出し側で mutex 保持済みであること

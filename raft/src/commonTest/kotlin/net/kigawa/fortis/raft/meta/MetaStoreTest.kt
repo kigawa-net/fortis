@@ -78,4 +78,32 @@ class MetaStoreTest {
             store.updatePlacement(RangePlacement(mapOf("r1" to "m1", "r2" to "mX")))
         }
     }
+
+    @Test
+    fun versionNeverMovesBackwardsAcrossUpdates() = runTest {
+        val table = table()
+        val store = MetaStore(
+            table,
+            ClusterMembership.initial(listOf(ClusterMember("m1"), ClusterMember("m2"))),
+            RangePlacement(mapOf("r1" to "m1", "r2" to "m2")),
+        )
+        val seen = mutableListOf(store.snapshot().version)
+
+        // 構成 v0->v1、配置更新でメタ版を進める
+        var membership = store.snapshot().membership.join(ClusterMember("m3"))
+        seen.add(store.updateMembership(membership).version)
+        seen.add(
+            store.updatePlacement(RangePlacement(mapOf("r1" to "m3", "r2" to "m2"))).version
+        )
+        seen.add(
+            store.updatePlacement(RangePlacement(mapOf("r1" to "m1", "r2" to "m2"))).version
+        )
+        // membership v1->v2 の更新でもメタ版は単調増加すること（後戻りしない）
+        membership = membership.leave("m3")
+        seen.add(store.updateMembership(membership).version)
+
+        val sorted = seen.sorted()
+        assertEquals(sorted, seen)
+        assertEquals(seen.toSet().size, seen.size)
+    }
 }

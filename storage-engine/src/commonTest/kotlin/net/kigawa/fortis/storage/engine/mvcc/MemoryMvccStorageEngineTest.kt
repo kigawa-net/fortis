@@ -81,4 +81,44 @@ class MemoryMvccStorageEngineTest {
             storage.release(MvccSnapshot(1))
         }
     }
+
+    @Test
+    fun retainCompactedVersionIsRejected() = runTest {
+        val storage = MemoryMvccStorageEngine()
+        val key = byteArrayOf(1)
+
+        storage.putAt(key, byteArrayOf(10), 1)
+        storage.putAt(key, byteArrayOf(20), 2)
+        storage.compact(1)
+
+        // 圧縮で失われた版のピン留めは拒否される
+        assertFailsWith<IllegalArgumentException> {
+            storage.retain(1)
+        }
+        // 最新版は保持できる
+        val pinned = storage.retain(2)
+        assertEquals(2L, pinned.version)
+        storage.release(pinned)
+    }
+
+    @Test
+    fun retainLatestProtectsSnapshotAtomically() = runTest {
+        val storage = MemoryMvccStorageEngine()
+        val key = byteArrayOf(1)
+
+        storage.putAt(key, byteArrayOf(10), 1)
+        storage.putAt(key, byteArrayOf(20), 2)
+
+        // 取得とピン留めが原子的のため、compact(2) は拒否される
+        val pinned = storage.retainLatest()
+        assertEquals(2L, pinned.version)
+        assertFailsWith<IllegalArgumentException> {
+            storage.compact(2)
+        }
+        assertContentEquals(byteArrayOf(20), storage.getAt(key, pinned.version))
+
+        storage.release(pinned)
+        storage.compact(2)
+        assertContentEquals(byteArrayOf(20), storage.get(key))
+    }
 }

@@ -43,6 +43,8 @@ class MetaStore(
      *
      * [newMembership.version] は現在の構成版より大きいこと、
      * 既存配置の担当がすべて新構成に残ることを要求する。
+     * メタ全体の版は単調増加し、配置のみ更新で進んだ版より
+     * 後戻りしない（次版 = max(構成版, 現版 + 1)）。
      */
     suspend fun updateMembership(newMembership: ClusterMembership): MetaSnapshot = mutex.withLock {
         require(newMembership.version > snapshot.membership.version) {
@@ -56,7 +58,8 @@ class MetaStore(
                 }
             }
         }
-        snapshot = MetaSnapshot(newMembership.version, newMembership, snapshot.placement)
+        val next = maxOf(newMembership.version, snapshot.version + 1)
+        snapshot = MetaSnapshot(next, newMembership, snapshot.placement)
         snapshot
     }
 
