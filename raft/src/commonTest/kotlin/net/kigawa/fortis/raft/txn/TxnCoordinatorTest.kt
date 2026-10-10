@@ -92,8 +92,7 @@ class TxnCoordinatorTest {
     }
 
     @Test
-    fun recoverAbortsPreparedRemainder() = runTest {
-        val engine = MemoryMvccStorageEngine()
+    fun recoverAbortsPreparedRemainder() = runTest {        val engine = MemoryMvccStorageEngine()
         engine.putAt(byteArrayOf(1), byteArrayOf(10), 1)
         val participant = TxnParticipant("g1", engine)
         val coordinator = TxnCoordinator(mapOf("g1" to participant))
@@ -112,5 +111,66 @@ class TxnCoordinatorTest {
 
         // 二度目の回復は何もしない
         assertEquals(0, coordinator.recover())
+    }
+
+    @Test
+    fun overlappingTransactionsConflictOnSameKey() = runTest {
+        val engine = MemoryMvccStorageEngine()
+        engine.putAt(byteArrayOf(1), byteArrayOf(10), 1)
+        val coordinator = TxnCoordinator(mapOf("g1" to TxnParticipant("g1", engine)))
+
+        // 同一スナップショットで開始した2件が同キーを書く
+        val txn1 = coordinator.begin()
+        val txn2 = coordinator.begin()
+        txn1.put("g1", byteArrayOf(1), byteArrayOf(20))
+        txn2.put("g1", byteArrayOf(1), byteArrayOf(30))
+
+        assertTrue(txn1.commit())
+        // 先行確定で版が進んだため後発は競合する
+        assertFalse(txn2.commit())
+        assertEquals(TxnState.ABORTED, txn2.record.state)
+        assertContentEquals(byteArrayOf(20), engine.get(byteArrayOf(1)))
+    }
+
+    @Test
+    fun preparedIntentBlocksOverlappingPrepare() = runTest {
+        val engine = MemoryMvccStorageEngine()
+        engine.putAt(byteArrayOf(1), byteArrayOf(10), 1)
+        val participant = TxnParticipant("g1", engine)
+        val coordinator = TxnCoordinator(mapOf("g1" to participant))
+
+        val txn1 = coordinator.begin()
+        txn1.put("g1", byteArrayOf(1), byteArrayOf(20))
+        assertTrue(participant.prepare(txn1.record))
+
+        // 版は進んでいないが write-intent が保持されているため拒否される
+        val txn2 = coordinator.begin()
+        txn2.put("g1", byteArrayOf(1), byteArrayOf(30))
+        assertFalse(participant.prepare(txn2.record))
+
+        // 破棄後は予約が解かれる
+        participant.abort(txn1.record)
+        txn1.record.state = TxnState.ABORTED
+        assertTrue(participant.prepare(txn2.record))
+        participant.abort(txn2.record)
+        assertContentEquals(byteArrayOf(10), engine.get(byteArrayOf(1)))
+    }
+
+    @Test
+    fun abaWriteIsDetectedByVersion() = runTest {
+        val engine = MemoryMvccStorageEngine()
+        engine.putAt(byteArrayOf(1), byteArrayOf(10), 1)
+        val coordinator = TxnCoordinator(mapOf("g1" to TxnParticipant("g1", engine)))
+
+        val txn = coordinator.begin()
+        assertContentEquals(byteArrayOf(10), txn.get("g1", byteArrayOf(1)))
+        // 外部書き込みで値が変わって元に戻る（値は同じだが版は進む）
+        engine.putAt(byteArrayOf(1), byteArrayOf(99), 2)
+        engine.putAt(byteArrayOf(1), byteArrayOf(10), 3)
+        txn.put("g1", byteArrayOf(1), byteArrayOf(20))
+
+        // 値比較では検出できないが版比較で競合する
+        assertFalse(txn.commit())
+        assertEquals(TxnState.ABORTED, txn.record.state)
     }
 }

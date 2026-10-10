@@ -60,6 +60,10 @@ class MemoryMvccStorageEngine : VersionedFortisStorageEngine {
         newestAt(histories[ByteArrayKey(key)], readVersion)?.copyOf()
     }
 
+    override suspend fun versionOf(key: ByteArray): Long = mutex.withLock {
+        histories[ByteArrayKey(key)]?.maxOfOrNull { it.version } ?: 0L
+    }
+
     override suspend fun latestVersion(): Long = mutex.withLock { latest }
 
     override suspend fun snapshot(): MvccSnapshot = mutex.withLock { MvccSnapshot(latest) }

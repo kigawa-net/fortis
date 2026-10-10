@@ -14,6 +14,10 @@ interface VersionedFortisStorageEngine : FortisStorageEngine {
     // readVersion が適用済み最大版より大きい場合は最新値を返す（未来読みは最新状態を見る）。
     suspend fun getAt(key: ByteArray, readVersion: Long): ByteArray?
 
+    // key に影響した最新 version。履歴なしは 0。
+    // トランザクションの版ベース競合検証に使う（値比較では ABA を検出できないため）。
+    suspend fun versionOf(key: ByteArray): Long
+
     // 適用済み最大 version。未適用時は 0。
     suspend fun latestVersion(): Long
 
