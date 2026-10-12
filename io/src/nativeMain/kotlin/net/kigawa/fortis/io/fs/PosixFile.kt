@@ -18,10 +18,17 @@ internal suspend fun FortisFile.withPosixFile(
             if (errno == ENOENT) throw FsFileNotFoundException(this@withPosixFile)
             throw posixError("open")
         }
+        var completedNormally = false
         try {
             block(fd)
+            completedNormally = true
         } finally {
-            close(fd)
+            // close(EINTR) is platform-dependent: do not blindly retry a possibly closed fd.
+            // Never mask a failure from the caller's I/O block.
+            val closeResult = close(fd)
+            if (closeResult < 0 && completedNormally) {
+                throw posixError("close")
+            }
         }
     }
 }
