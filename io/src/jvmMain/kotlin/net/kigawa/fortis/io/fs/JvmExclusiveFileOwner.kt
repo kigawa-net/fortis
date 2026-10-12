@@ -8,6 +8,7 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.BasicFileAttributes
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -21,8 +22,31 @@ internal class JvmExclusiveFileOwner private constructor(
     val dataDirectory: Path,
     private val channel: FileChannel,
     private val lock: FileLock,
+    private val lockFileKey: Any,
 ) : AutoCloseable {
     private val closed = AtomicBoolean(false)
+
+    /**
+     * Advisory diagnostic/fail-closed check, not an atomic fencing mechanism:
+     * a malicious replacement can race with the following disk operation.
+     */
+    fun verifyLockFileIdentity() {
+        if (closed.get() || !lock.isValid) {
+            throw IOException("Replica writer lock is no longer held: $dataDirectory")
+        }
+        val current = try {
+            Files.readAttributes(
+                dataDirectory.resolve(".fortis-writer.lock"),
+                BasicFileAttributes::class.java,
+                LinkOption.NOFOLLOW_LINKS,
+            )
+        } catch (failure: IOException) {
+            throw IOException("Replica writer lock path is unavailable: $dataDirectory", failure)
+        }
+        if (!current.isRegularFile || current.fileKey() != lockFileKey) {
+            throw IOException("Replica writer lock file identity has changed: $dataDirectory")
+        }
+    }
 
     override fun close() {
         if (closed.compareAndSet(false, true)) {
@@ -67,7 +91,18 @@ internal class JvmExclusiveFileOwner private constructor(
                     null
                 }
                 if (lock == null) throw WriterAlreadyOwned(canonicalDirectory)
-                return JvmExclusiveFileOwner(canonicalDirectory, channel, lock)
+                val attributes = Files.readAttributes(
+                    lockPath,
+                    BasicFileAttributes::class.java,
+                    LinkOption.NOFOLLOW_LINKS,
+                )
+                val fileKey = attributes.fileKey()
+                    ?: throw IOException("Filesystem cannot verify writer lock file identity: $lockPath")
+                if (!attributes.isRegularFile) {
+                    throw IOException("Writer lock path is not a regular file: $lockPath")
+                }
+                return JvmExclusiveFileOwner(canonicalDirectory, channel, lock, fileKey)
+                    .also { it.verifyLockFileIdentity() }
             } catch (failure: Throwable) {
                 try {
                     channel.close()
