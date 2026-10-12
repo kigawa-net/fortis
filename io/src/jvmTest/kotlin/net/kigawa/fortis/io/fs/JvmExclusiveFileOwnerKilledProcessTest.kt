@@ -2,6 +2,7 @@ package net.kigawa.fortis.io.fs
 
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertFailsWith
@@ -38,7 +39,17 @@ class JvmExclusiveFileOwnerKilledProcessTest {
             val java = Path.of(System.getProperty("java.home"), "bin", "java").toString()
             child = ProcessBuilder(java, source.toString(), directory.toString())
                 .redirectErrorStream(true).start()
-            val ready = child.inputStream.bufferedReader().readLine()
+            // Blocking readLine() directly could hang forever if child never prints.
+            val runningChild = child
+            val readyFuture = CompletableFuture.supplyAsync {
+                runningChild.inputStream.bufferedReader().readLine()
+            }
+            val ready = try {
+                readyFuture.get(30, TimeUnit.SECONDS)
+            } catch (failure: Exception) {
+                runningChild.destroyForcibly()
+                throw IllegalStateException("Lock holder did not become ready within 30s", failure)
+            }
             check(ready == "LOCKED") { "Lock holder failed to start: $ready" }
             assertFailsWith<WriterAlreadyOwned> {
                 JvmExclusiveFileOwner.tryAcquire(directory)
