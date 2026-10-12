@@ -11,6 +11,11 @@ interface FsOutput: Output {
         length: Int,
     ): Int
 
+    /**
+     * Single-writer append only. This API is NOT atomic across independent file
+     * descriptors/processes; the WAL/log owner must ensure exclusive path ownership.
+     * A local Kotlin mutex is not a cross-process lock. Handle short writes explicitly.
+     */
     suspend fun writeAppend(
         data: ByteArray,
         dataOffset: Int,
