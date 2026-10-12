@@ -46,10 +46,10 @@ internal class JvmExclusiveFileOwner private constructor(
             if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) {
                 throw IllegalArgumentException("Replica data root must be an existing non-symlink directory")
             }
-            val canonicalDirectory = directory.toRealPath(LinkOption.NOFOLLOW_LINKS)
-            if (Files.isSymbolicLink(canonicalDirectory)) {
-                throw IllegalArgumentException("Symlinked replica data root is not allowed")
-            }
+            // The leaf directory is already rejected if symlinked. Resolve symlinked
+            // ANCESTORS to a stable physical path so distinct path aliases cannot
+            // masquerade as different replica directories.
+            val canonicalDirectory = directory.toRealPath()
             val lockPath = canonicalDirectory.resolve(LOCK_FILE)
             if (Files.isSymbolicLink(lockPath)) {
                 throw IllegalArgumentException("Symlinked writer lock file is not allowed")
