@@ -40,6 +40,11 @@ class FortisFileActualTest {
                 assertContentEquals(payload, actual)
             }
 
+            // Verify replacement of an existing generation, not only first publication.
+            target.openWrite(isCreate = true) { output ->
+                output.writeFully("old-generation".encodeToByteArray())
+                output.sync()
+            }
             staged.atomicReplace(target)
             directory.syncDirectory()
 
@@ -57,6 +62,29 @@ class FortisFileActualTest {
         } finally {
             staged.deleteIfExists()
             target.deleteIfExists()
+        }
+    }
+
+    @Test
+    fun singleWriterAppendCanBeReopened() = runBlocking {
+        val name = "fortis-io-append-${Random.nextLong().toULong().toString(16)}"
+        val candidate = file(name)
+        val initial = "prefix".encodeToByteArray()
+        val tail = "-suffix".encodeToByteArray()
+        try {
+            candidate.openWrite(isCreate = true) { output ->
+                output.writeFully(initial)
+                val count = output.writeAppend(tail, 0, tail.size)
+                assertEquals(tail.size, count)
+                output.sync()
+            }
+            candidate.openRead { input ->
+                val actual = ByteArray(initial.size + tail.size)
+                assertEquals(actual.size, input.readAt(0L, actual, 0, actual.size))
+                assertContentEquals(initial + tail, actual)
+            }
+        } finally {
+            candidate.deleteIfExists()
         }
     }
 
