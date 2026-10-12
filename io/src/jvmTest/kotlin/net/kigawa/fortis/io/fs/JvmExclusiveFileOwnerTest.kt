@@ -3,6 +3,7 @@ package net.kigawa.fortis.io.fs
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
@@ -47,6 +48,33 @@ class JvmExclusiveFileOwnerTest {
             Files.deleteIfExists(directory.resolve(".fortis-writer.lock"))
             Files.deleteIfExists(directory)
             Files.deleteIfExists(other)
+        }
+    }
+
+    @Test
+    fun parentSymlinkAliasesResolveToTheSameOwnerDirectory() {
+        val parent = Files.createTempDirectory("fortis-writer-parent-")
+        val real = Files.createDirectory(parent.resolve("real"))
+        val replica = Files.createDirectory(real.resolve("replica"))
+        val alias = parent.resolve("alias")
+        try {
+            try {
+                Files.createSymbolicLink(alias, real)
+            } catch (_: UnsupportedOperationException) {
+                return
+            }
+            JvmExclusiveFileOwner.tryAcquire(alias.resolve("replica")).use { first ->
+                assertEquals(replica.toRealPath(), first.dataDirectory)
+                assertFailsWith<WriterAlreadyOwned> {
+                    JvmExclusiveFileOwner.tryAcquire(replica)
+                }
+            }
+        } finally {
+            Files.deleteIfExists(replica.resolve(".fortis-writer.lock"))
+            Files.deleteIfExists(alias)
+            Files.deleteIfExists(replica)
+            Files.deleteIfExists(real)
+            Files.deleteIfExists(parent)
         }
     }
 
