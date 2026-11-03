@@ -1,5 +1,6 @@
 package net.kigawa.fortis.raft
 
+import net.kigawa.fortis.raft.batch.ConditionalBatchRequest
 import net.kigawa.fortis.storage.engine.FortisStorageEngine
 import net.kigawa.fortis.storage.engine.mvcc.VersionedFortisStorageEngine
 
@@ -16,6 +17,23 @@ sealed interface RaftCommand {
         when (this) {
             is Put -> versioned.putAt(key, value, version)
             is Delete -> versioned.deleteAt(key, version)
+            is ConditionalBatch -> throw IllegalStateException(CONDITIONAL_BATCH_REQUIRES_STATE_MACHINE)
+        }
+    }
+
+    /**
+     * 条件付き batch。適用は受付記録と一体で [StorageEngineStateMachine] が行うため、
+     * storage への直接適用はできない（execute/executeAt は失敗する）。
+     */
+    data class ConditionalBatch(
+        val request: ConditionalBatchRequest,
+    ) : RaftCommand {
+        override suspend fun execute(storageEngine: FortisStorageEngine) {
+            throw IllegalStateException(CONDITIONAL_BATCH_REQUIRES_STATE_MACHINE)
+        }
+
+        override suspend fun executeAt(storageEngine: FortisStorageEngine, version: Long) {
+            throw IllegalStateException(CONDITIONAL_BATCH_REQUIRES_STATE_MACHINE)
         }
     }
     data class Put(
@@ -66,3 +84,6 @@ sealed interface RaftCommand {
         }
     }
 }
+
+private const val CONDITIONAL_BATCH_REQUIRES_STATE_MACHINE =
+    "ConditionalBatch must be applied through StorageEngineStateMachine.applyAt"

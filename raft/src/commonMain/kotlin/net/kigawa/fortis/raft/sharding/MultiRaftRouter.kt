@@ -1,6 +1,7 @@
 package net.kigawa.fortis.raft.sharding
 
 import net.kigawa.fortis.raft.RaftCommand
+import net.kigawa.fortis.raft.batch.UnsupportedCrossGroupBatchException
 
 /**
  * 単一レンジを担当するグループの識別子。
@@ -56,5 +57,15 @@ class MultiRaftRouter(
     fun routeCommand(command: RaftCommand): GroupHandle = when (command) {
         is RaftCommand.Put -> route(command.key)
         is RaftCommand.Delete -> route(command.key)
+        is RaftCommand.ConditionalBatch -> routeBatch(command)
+    }
+
+    // 条件付き batch は全キーが同一グループに属する場合のみ受け付ける（跨グループは fail closed）。
+    private fun routeBatch(command: RaftCommand.ConditionalBatch): GroupHandle {
+        val keys = command.request.conditions.map { it.key } + command.request.mutations.map { it.key }
+        val handles = keys.map { route(it) }
+        val rangeIds = handles.map { it.rangeId }.toSet()
+        if (rangeIds.size != 1) throw UnsupportedCrossGroupBatchException(rangeIds)
+        return handles.first()
     }
 }

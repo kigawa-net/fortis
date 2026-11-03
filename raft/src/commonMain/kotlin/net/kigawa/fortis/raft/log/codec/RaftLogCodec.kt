@@ -1,6 +1,7 @@
 package net.kigawa.fortis.raft.log.codec
 
 import net.kigawa.fortis.raft.RaftCommand
+import net.kigawa.fortis.raft.batch.ConditionalBatchCodec
 import net.kigawa.fortis.raft.log.RaftLogEntry
 import net.kigawa.fortis.raft.log.RaftLogEntryPayload
 
@@ -24,6 +25,12 @@ class RaftLogCodec(
                 is RaftCommand.Delete -> {
                     commandType = DELETE
                     key = command.key
+                    value = null
+                }
+
+                is RaftCommand.ConditionalBatch -> {
+                    commandType = CONDITIONAL_BATCH
+                    key = ConditionalBatchCodec.encode(command.request)
                     value = null
                 }
             }
@@ -87,7 +94,9 @@ class RaftLogCodec(
             )
         }
         val commandType = data[offset + 21]
-        if (commandType != PUT && commandType != DELETE && commandType != NO_OP) {
+        if (commandType != PUT && commandType != DELETE && commandType != NO_OP &&
+            commandType != CONDITIONAL_BATCH
+        ) {
             return RaftLogDecodeResult.Corrupted(
                 "Unknown Raft command type: $commandType",
             )
@@ -107,6 +116,12 @@ class RaftLogCodec(
             DELETE -> if (valueLength != -1) {
                 return RaftLogDecodeResult.Corrupted(
                     "DELETE entry must not contain a value",
+                )
+            }
+
+            CONDITIONAL_BATCH -> if (valueLength != -1) {
+                return RaftLogDecodeResult.Corrupted(
+                    "CONDITIONAL_BATCH entry must not contain a value",
                 )
             }
         }
@@ -133,6 +148,12 @@ class RaftLogCodec(
             )
 
             DELETE -> RaftLogEntryPayload.Command(RaftCommand.Delete(key))
+            CONDITIONAL_BATCH -> try {
+                RaftLogEntryPayload.Command(RaftCommand.ConditionalBatch(ConditionalBatchCodec.decode(key)))
+            } catch (cause: IllegalArgumentException) {
+                return RaftLogDecodeResult.Corrupted("Invalid conditional batch: ${cause.message}")
+            }
+
             else -> RaftLogEntryPayload.NoOp
         }
         return RaftLogDecodeResult.Success(
@@ -180,5 +201,6 @@ class RaftLogCodec(
         const val PUT: Byte = 1
         const val DELETE: Byte = 2
         const val NO_OP: Byte = 3
+        const val CONDITIONAL_BATCH: Byte = 4
     }
 }

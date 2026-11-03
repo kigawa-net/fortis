@@ -121,6 +121,12 @@ class MemoryMvccStorageEngine : VersionedFortisStorageEngine {
         if (upToVersion > compactedFloor) compactedFloor = upToVersion
     }
 
+    override suspend fun exportHistory(): List<MvccHistoryRecord> = mutex.withLock {
+        histories.flatMap { (key, history) ->
+            history.map { MvccHistoryRecord(key.bytes, it.version, it.value) }
+        }.sortedBy { it.version }
+    }
+
     // 呼び出し側で mutex 保持済みであること
     private fun addLocked(key: ByteArray, value: ByteArray, version: Long) {
         val history = histories.getOrPut(ByteArrayKey(key)) { mutableListOf() }

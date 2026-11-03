@@ -60,6 +60,9 @@ class RaftBackup(
                 is RaftCommand.Delete -> RaftLogEntryPayload.Command(
                     RaftCommand.Delete(command.key.copyOf()),
                 )
+
+                // 要求本体はイミュータブル（防御コピー済み）のため共有して問題ない
+                is RaftCommand.ConditionalBatch -> payload
             }
 
             RaftLogEntryPayload.NoOp -> payload
