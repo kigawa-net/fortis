@@ -36,51 +36,81 @@ sealed interface RaftCommand {
             throw IllegalStateException(CONDITIONAL_BATCH_REQUIRES_STATE_MACHINE)
         }
     }
-    data class Put(
-        val key: ByteArray,
-        val value: ByteArray,
+    /**
+     * 単一キーへの put。key/value は構築時に防御コピーし、getter も毎回コピーを返す。
+     * 呼び出し側が元配列を書き換えても、log/apply/replication で観測される内容は変わらない。
+     */
+    class Put(
+        key: ByteArray,
+        value: ByteArray,
     ) : RaftCommand {
+        private val keyBytes: ByteArray = key.copyOf()
+        private val valueBytes: ByteArray = value.copyOf()
+
+        val key: ByteArray
+            get() = keyBytes.copyOf()
+
+        val value: ByteArray
+            get() = valueBytes.copyOf()
+
+        fun copy(key: ByteArray = this.key, value: ByteArray = this.value): Put = Put(key, value)
+
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
             if (other == null || this::class != other::class) return false
 
             other as Put
 
-            if (!key.contentEquals(other.key)) return false
-            if (!value.contentEquals(other.value)) return false
+            if (!keyBytes.contentEquals(other.keyBytes)) return false
+            if (!valueBytes.contentEquals(other.valueBytes)) return false
 
             return true
         }
 
         override fun hashCode(): Int {
-            var result = key.contentHashCode()
-            result = 31 * result + value.contentHashCode()
+            var result = keyBytes.contentHashCode()
+            result = 31 * result + valueBytes.contentHashCode()
             return result
         }
 
+        override fun toString(): String =
+            "Put(key=${keyBytes.contentToString()}, value=${valueBytes.contentToString()})"
+
         override suspend fun execute(storageEngine: FortisStorageEngine) {
-            storageEngine.put(key, value)
+            storageEngine.put(keyBytes.copyOf(), valueBytes.copyOf())
         }
     }
 
-    data class Delete(
-        val key: ByteArray,
+    /**
+     * 単一キーへの delete。key は構築時に防御コピーし、getter も毎回コピーを返す。
+     */
+    class Delete(
+        key: ByteArray,
     ) : RaftCommand {
+        private val keyBytes: ByteArray = key.copyOf()
+
+        val key: ByteArray
+            get() = keyBytes.copyOf()
+
+        fun copy(key: ByteArray = this.key): Delete = Delete(key)
+
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
             if (other == null || this::class != other::class) return false
 
             other as Delete
 
-            return key.contentEquals(other.key)
+            return keyBytes.contentEquals(other.keyBytes)
         }
 
         override fun hashCode(): Int {
-            return key.contentHashCode()
+            return keyBytes.contentHashCode()
         }
 
+        override fun toString(): String = "Delete(key=${keyBytes.contentToString()})"
+
         override suspend fun execute(storageEngine: FortisStorageEngine) {
-            storageEngine.delete(key)
+            storageEngine.delete(keyBytes.copyOf())
         }
     }
 }
