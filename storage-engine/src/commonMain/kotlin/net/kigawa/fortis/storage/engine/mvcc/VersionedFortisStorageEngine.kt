@@ -36,6 +36,9 @@ interface VersionedFortisStorageEngine : FortisStorageEngine {
     // retain で取得したスナップショットを解放する。未保持の解放は失敗する。
     suspend fun release(snapshot: MvccSnapshot)
 
+    // 保持中の全履歴を版昇順で返す。スナップショット取得用。compact で削除済みの版は含まない。
+    suspend fun exportHistory(): List<MvccHistoryRecord>
+
     // 各キーについて upToVersion 以下の履歴のうち最新1件だけ残す。
     // 最新読みの結果は変わらない。
     // ピン留め中の最小 version 以上の履歴を破壊する場合は IllegalArgumentException。

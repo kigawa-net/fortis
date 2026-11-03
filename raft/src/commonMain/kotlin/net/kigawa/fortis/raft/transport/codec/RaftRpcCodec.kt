@@ -1,6 +1,7 @@
 package net.kigawa.fortis.raft.transport.codec
 
 import net.kigawa.fortis.raft.RaftCommand
+import net.kigawa.fortis.raft.batch.ConditionalBatchCodec
 import net.kigawa.fortis.raft.append.AppendEntriesRequest
 import net.kigawa.fortis.raft.append.AppendEntriesResponse
 import net.kigawa.fortis.raft.log.RaftLogEntry
@@ -231,11 +232,13 @@ class RaftRpcCodec(
         val valueLength = when (val command = entry.command) {
             is RaftCommand.Put -> command.value.size
             is RaftCommand.Delete -> 0
+            is RaftCommand.ConditionalBatch -> 0
             null -> 0
         }
         val keyLength = when (val command = entry.command) {
             is RaftCommand.Put -> command.key.size
             is RaftCommand.Delete -> command.key.size
+            is RaftCommand.ConditionalBatch -> ConditionalBatchCodec.encode(command.request).size
             null -> 0
         }
         val entrySize = 25L + keyLength + valueLength
@@ -262,6 +265,12 @@ class RaftRpcCodec(
                 is RaftCommand.Delete -> {
                     commandType = DELETE
                     key = command.key
+                    value = null
+                }
+
+                is RaftCommand.ConditionalBatch -> {
+                    commandType = CONDITIONAL_BATCH
+                    key = ConditionalBatchCodec.encode(command.request)
                     value = null
                 }
             }
@@ -482,7 +491,9 @@ class RaftRpcCodec(
         val valueLength = readInt(data, start + 21)
         if (index <= 0) return EntryResult.Corrupted("Invalid log index: $index")
         if (term < 0) return EntryResult.Corrupted("Invalid log term: $term")
-        if (commandType != PUT && commandType != DELETE && commandType != NO_OP) {
+        if (commandType != PUT && commandType != DELETE && commandType != NO_OP &&
+            commandType != CONDITIONAL_BATCH
+        ) {
             return EntryResult.Corrupted("Unknown Raft command type: $commandType")
         }
         if (keyLength < 0) return EntryResult.Corrupted("Invalid key length: $keyLength")
@@ -493,6 +504,10 @@ class RaftRpcCodec(
 
             DELETE -> if (valueLength != -1) {
                 return EntryResult.Corrupted("DELETE command must not contain a value")
+            }
+
+            CONDITIONAL_BATCH -> if (valueLength != -1) {
+                return EntryResult.Corrupted("CONDITIONAL_BATCH command must not contain a value")
             }
         }
         if (commandType == NO_OP && (keyLength != 0 || valueLength != -1)) {
@@ -510,6 +525,11 @@ class RaftRpcCodec(
                 RaftCommand.Put(key, data.copyOfRange(keyEnd, keyEnd + valueLength)),
             )
             DELETE -> RaftLogEntryPayload.Command(RaftCommand.Delete(key))
+            CONDITIONAL_BATCH -> try {
+                RaftLogEntryPayload.Command(RaftCommand.ConditionalBatch(ConditionalBatchCodec.decode(key)))
+            } catch (cause: IllegalArgumentException) {
+                return EntryResult.Corrupted("Invalid conditional batch: ${cause.message}")
+            }
             else -> RaftLogEntryPayload.NoOp
         }
         return EntryResult.Success(
@@ -600,6 +620,7 @@ class RaftRpcCodec(
         private const val PUT: Byte = 1
         private const val DELETE: Byte = 2
         private const val NO_OP: Byte = 3
+        private const val CONDITIONAL_BATCH: Byte = 4
         private val MAGIC = byteArrayOf(
             'F'.code.toByte(),
             'R'.code.toByte(),

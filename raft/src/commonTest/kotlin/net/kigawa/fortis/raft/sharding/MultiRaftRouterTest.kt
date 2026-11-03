@@ -1,6 +1,10 @@
 package net.kigawa.fortis.raft.sharding
 
 import net.kigawa.fortis.raft.RaftCommand
+import net.kigawa.fortis.raft.batch.ConditionalBatchRequest
+import net.kigawa.fortis.raft.batch.KvCondition
+import net.kigawa.fortis.raft.batch.KvMutation
+import net.kigawa.fortis.raft.batch.UnsupportedCrossGroupBatchException
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -39,6 +43,29 @@ class MultiRaftRouterTest {
         assertEquals("g1", router.routeCommand(RaftCommand.Put(byteArrayOf(0x61), byteArrayOf(1))).rangeId)
         assertEquals("g2", router.routeCommand(RaftCommand.Delete(byteArrayOf(0x6D))).rangeId)
     }
+
+    @Test
+    fun conditionalBatchWithinOneGroupRoutesToThatGroup() {
+        val command = batch(
+            conditions = listOf(KvCondition.Absent(byteArrayOf(0x61))),
+            mutations = listOf(KvMutation.Put(byteArrayOf(0x62), byteArrayOf(1))),
+        )
+        assertEquals("g1", router().routeCommand(command).rangeId)
+    }
+
+    @Test
+    fun conditionalBatchSpanningGroupsFailsClosed() {
+        val command = batch(
+            conditions = listOf(KvCondition.Absent(byteArrayOf(0x61))),
+            mutations = listOf(KvMutation.Put(byteArrayOf(0x6D), byteArrayOf(1))),
+        )
+        assertFailsWith<UnsupportedCrossGroupBatchException> { router().routeCommand(command) }
+    }
+
+    private fun batch(
+        conditions: List<KvCondition>,
+        mutations: List<KvMutation>,
+    ) = RaftCommand.ConditionalBatch(ConditionalBatchRequest("tenant-a/alice", "r1", conditions, mutations))
 
     @Test
     fun rejectsGroupMismatch() {
