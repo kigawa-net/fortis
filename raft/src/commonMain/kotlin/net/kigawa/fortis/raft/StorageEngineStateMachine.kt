@@ -4,6 +4,7 @@ import net.kigawa.fortis.raft.batch.ConditionalBatchApplier
 import net.kigawa.fortis.raft.batch.ConditionalBatchCodec
 import net.kigawa.fortis.raft.batch.RequestReceiptLedger
 import net.kigawa.fortis.storage.engine.FortisStorageEngine
+import net.kigawa.fortis.storage.engine.mvcc.MvccScanResult
 import net.kigawa.fortis.storage.engine.mvcc.VersionedFortisStorageEngine
 
 class StorageEngineStateMachine(
@@ -24,6 +25,17 @@ class StorageEngineStateMachine(
 
     /** Local read; call through RaftRuntime.linearizableRead for a quorum-confirmed read. */
     suspend fun get(key: ByteArray): ByteArray? = storage.get(key)
+
+    /** 適用済みの最大 revision（Raft log index）。線形化可能読み取りの中で呼ぶこと。 */
+    suspend fun latestRevision(): Long = versioned().latestVersion()
+
+    /** revision 固定の prefix 走査 1 ページ。線形化可能読み取りの中で呼ぶこと。 */
+    suspend fun scanPrefixAt(
+        prefix: ByteArray,
+        readRevision: Long,
+        startAfter: ByteArray?,
+        limit: Int,
+    ): MvccScanResult = versioned().scanPrefixAt(prefix, readRevision, startAfter, limit)
 
     /**
      * MVCC 履歴と受付記録のスナップショット。呼び出し側は適用が止まった状態

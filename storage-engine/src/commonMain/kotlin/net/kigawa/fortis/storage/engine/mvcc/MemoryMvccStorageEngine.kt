@@ -3,6 +3,8 @@ package net.kigawa.fortis.storage.engine.mvcc
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import net.kigawa.fortis.storage.engine.ByteArrayKey
+import net.kigawa.fortis.storage.engine.BytewiseOrder
+import net.kigawa.fortis.storage.engine.hasBytePrefix
 
 // バージョン付き履歴エントリ。value=null は削除マーカー。
 class VersionedEntry(
@@ -121,6 +123,31 @@ class MemoryMvccStorageEngine : VersionedFortisStorageEngine {
         if (upToVersion > compactedFloor) compactedFloor = upToVersion
     }
 
+    override suspend fun scanPrefixAt(
+        prefix: ByteArray,
+        readVersion: Long,
+        startAfter: ByteArray?,
+        limit: Int,
+    ): MvccScanResult = mutex.withLock {
+        require(limit > 0) { "limit must be positive" }
+        require(readVersion in 0..latest) {
+            "cannot scan at version $readVersion (latest=$latest)"
+        }
+        if (readVersion < compactedFloor) return@withLock MvccScanResult.Compacted(compactedFloor)
+        val keys = histories.keys
+            .filter { it.bytes.hasBytePrefix(prefix) }
+            .filter { startAfter == null || BytewiseOrder.compare(it.bytes, startAfter) > 0 }
+            .sortedWith { a, b -> BytewiseOrder.compare(a.bytes, b.bytes) }
+        val entries = mutableListOf<MvccScanEntry>()
+        for (key in keys) {
+            val visible = newestEntryAt(histories.getValue(key), readVersion) ?: continue
+            val value = visible.value ?: continue
+            if (entries.size == limit) return@withLock MvccScanResult.Page(entries, hasMore = true)
+            entries.add(MvccScanEntry(key.bytes, visible.version, value))
+        }
+        MvccScanResult.Page(entries, hasMore = false)
+    }
+
     override suspend fun exportHistory(): List<MvccHistoryRecord> = mutex.withLock {
         histories.flatMap { (key, history) ->
             history.map { MvccHistoryRecord(key.bytes, it.version, it.value) }
@@ -145,6 +172,16 @@ class MemoryMvccStorageEngine : VersionedFortisStorageEngine {
         history.sortBy { it.version }
         if (version > latest) latest = version
         return existed
+    }
+
+    // readVersion 以下の最新エントリ（tombstone を含む）。履歴なしは null。
+    private fun newestEntryAt(history: List<VersionedEntry>, readVersion: Long): VersionedEntry? {
+        var result: VersionedEntry? = null
+        for (entry in history) {
+            if (entry.version > readVersion) break
+            result = entry
+        }
+        return result
     }
 
     // readVersion 以下の最新値。tombstone/履歴なしは null。

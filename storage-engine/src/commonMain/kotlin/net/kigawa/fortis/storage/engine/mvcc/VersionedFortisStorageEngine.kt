@@ -39,6 +39,18 @@ interface VersionedFortisStorageEngine : FortisStorageEngine {
     // 保持中の全履歴を版昇順で返す。スナップショット取得用。compact で削除済みの版は含まない。
     suspend fun exportHistory(): List<MvccHistoryRecord>
 
+    // readVersion 時点で prefix に一致し startAfter より大きい可視キーを、バイト辞書順に最大 limit 件返す。
+    // startAfter=null は先頭から。tombstone は除外する。
+    // 1 回の呼び出しは単一の排他区間で評価されるため、compact が途中に入って結果が混ざることはない。
+    // readVersion が compact で失われていれば Compacted を返す（readVersion >= floor なら版は保持されている）。
+    // readVersion は 0 以上かつ latestVersion() 以下であること。
+    suspend fun scanPrefixAt(
+        prefix: ByteArray,
+        readVersion: Long,
+        startAfter: ByteArray?,
+        limit: Int,
+    ): MvccScanResult
+
     // 各キーについて upToVersion 以下の履歴のうち最新1件だけ残す。
     // 最新読みの結果は変わらない。
     // ピン留め中の最小 version 以上の履歴を破壊する場合は IllegalArgumentException。
