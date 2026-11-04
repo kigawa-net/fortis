@@ -6,9 +6,9 @@ import net.kigawa.fortis.io.fs.FortisFile
 import net.kigawa.fortis.io.fs.openRead
 import net.kigawa.fortis.io.fs.openWrite
 import net.kigawa.fortis.storage.engine.wal.Wal
-import net.kigawa.fortis.storage.engine.wal.WalCodec
-import net.kigawa.fortis.storage.engine.wal.WalDecodeResult
-import net.kigawa.fortis.storage.engine.wal.WalRecord
+import net.kigawa.fortis.storage.engine.wal.codec.WalCodec
+import net.kigawa.fortis.storage.engine.wal.codec.WalDecodeResult
+import net.kigawa.fortis.storage.engine.wal.codec.WalRecord
 
 data class FileWal(
     val file: FortisFile,
