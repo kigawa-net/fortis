@@ -22,6 +22,9 @@ import net.kigawa.fortis.raft.candidate.CandidateNode
 import net.kigawa.fortis.raft.follower.FollowerNode
 import net.kigawa.fortis.raft.leader.LeaderNode
 import net.kigawa.fortis.raft.log.RaftLogEntry
+import net.kigawa.fortis.raft.logging.NoOpLogger
+import net.kigawa.fortis.raft.logging.RaftLogEvents
+import net.kigawa.fortis.raft.logging.RaftLogger
 import net.kigawa.fortis.raft.node.RaftNode
 import net.kigawa.fortis.raft.node.RaftTimeoutEvent
 import net.kigawa.fortis.raft.snapshot.InstallSnapshotRequest
@@ -42,7 +45,17 @@ class RaftRuntime(
     proposalCoroutineContext: CoroutineContext = Dispatchers.Default,
     private val snapshotApplier: RaftSnapshotApplier = RaftSnapshotApplier.NoOp,
     private val snapshotProvider: RaftSnapshotProvider? = null,
+    private val logger: RaftLogger,
 ) {
+    /** 既存のコンストラクタを維持し、ログ出力を無効にして生成する。 */
+    constructor(
+        initialNode: RaftNode,
+        transport: RaftTransport,
+        proposalCoroutineContext: CoroutineContext = Dispatchers.Default,
+        snapshotApplier: RaftSnapshotApplier = RaftSnapshotApplier.NoOp,
+        snapshotProvider: RaftSnapshotProvider? = null,
+    ) : this(initialNode, transport, proposalCoroutineContext, snapshotApplier, snapshotProvider, NoOpLogger)
+
     private val mutex = Mutex()
     private val peerRpcMutexes = initialNode.peerIds.associateWith { Mutex() }
     private var node: RaftNode = initialNode
@@ -82,8 +95,10 @@ class RaftRuntime(
     suspend fun handleRequestVote(
         request: RequestVoteRequest,
     ): RequestVoteResponse = mutex.withLock {
+        val previous = node
         val result = node.handleRequestVote(request)
         node = result.node
+        logLeadershipTransition(previous, node)
         settlePending()
         result.value
     }
@@ -91,8 +106,10 @@ class RaftRuntime(
     suspend fun handleAppendEntries(
         request: AppendEntriesRequest,
     ): AppendEntriesResponse = mutex.withLock {
+        val previous = node
         val result = node.handleAppendEntries(request)
         node = result.node
+        logLeadershipTransition(previous, node)
         settlePending()
         result.value
     }
@@ -106,17 +123,28 @@ class RaftRuntime(
     suspend fun handleInstallSnapshot(
         request: InstallSnapshotRequest,
     ): InstallSnapshotResponse = mutex.withLock {
+        val previous = node
         val previousTerm = node.persistentState.currentTerm
         val response = snapshotHandler.handle(request)
+        logger.info(
+            RaftLogEvents.COMPONENT_RUNTIME,
+            RaftLogEvents.INSTALL_SNAPSHOT_RECEIVED,
+            mapOf(
+                "term" to request.term.toString(),
+                "leaderId" to request.leaderId,
+            ),
+        )
         if (request.term >= previousTerm && node !is FollowerNode) {
             node = node.follower()
         }
+        logLeadershipTransition(previous, node)
         settlePending()
         response
     }
 
     suspend fun onElectionTimeout() {
         val election = mutex.withLock {
+            val previous = node
             val result = when (val current = node) {
                 is FollowerNode -> current.onElectionTimeout()
                 is CandidateNode -> current.onElectionTimeout()
@@ -124,6 +152,12 @@ class RaftRuntime(
             }
             node = result.node
             settlePending()
+            logger.info(
+                RaftLogEvents.COMPONENT_RUNTIME,
+                RaftLogEvents.ELECTION_STARTED,
+                mapOf("term" to node.persistentState.currentTerm.toString()),
+            )
+            logLeadershipTransition(previous, node)
             val candidate = node as? CandidateNode ?: return
             ElectionRound(candidate, result.value, node.peerIds.toList())
         }
@@ -146,7 +180,9 @@ class RaftRuntime(
             mutex.withLock stateLock@{
                 if (observeHigherTerm(response.term)) return@stateLock
                 if (!isCurrentElection(election)) return@stateLock
+                val previous = node
                 node = election.candidate.handleRequestVoteResponse(peerId, response)
+                logLeadershipTransition(previous, node)
                 settlePending()
             }
         }
@@ -156,6 +192,11 @@ class RaftRuntime(
         val round = mutex.withLock {
             val leader = node as? LeaderNode ?: return
             leader.timer.reset(RaftTimeoutEvent.Heartbeat)
+            logger.debug(
+                RaftLogEvents.COMPONENT_RUNTIME,
+                RaftLogEvents.HEARTBEAT_SENT,
+                mapOf("term" to leader.persistentState.currentTerm.toString()),
+            )
             leaderRound(leader)
         }
         replicateRound(round)
@@ -170,6 +211,14 @@ class RaftRuntime(
                 ?: error("Only leader can append commands")
             leader.appendCommand(command) to leaderRound(leader)
         }
+        logger.debug(
+            RaftLogEvents.COMPONENT_RUNTIME,
+            RaftLogEvents.COMMAND_APPENDED,
+            mapOf(
+                "index" to entry.index.toString(),
+                "term" to entry.term.toString(),
+            ),
+        )
         replicateRound(round)
         return entry
     }
@@ -193,6 +242,11 @@ class RaftRuntime(
                         if (!proposalJob.isActive) throw RaftProposalStoppedException()
                         val leader = node as? LeaderNode ?: throw RaftProposalNotLeaderException()
                         val entry = leader.appendCommand(command)
+                        logger.debug(
+                            RaftLogEvents.COMPONENT_RUNTIME,
+                            RaftLogEvents.COMMAND_APPENDED,
+                            mapOf("index" to entry.index.toString(), "term" to entry.term.toString()),
+                        )
                         val round = leaderRound(leader)
                         if (completion.isActive) proposals[entry.index] = PendingProposal(round, entry, completion)
                         settlePending()
@@ -364,6 +418,14 @@ class RaftRuntime(
                 snapshotAttempts[peerId] = it
             }
         }
+        logger.debug(
+            RaftLogEvents.COMPONENT_RUNTIME,
+            RaftLogEvents.INSTALL_SNAPSHOT_SENT,
+            mapOf(
+                "peerId" to peerId,
+                "term" to attempt.request.term.toString(),
+            ),
+        )
         val response = try {
             transport.installSnapshot(peerId, attempt.request)
         } catch (_: RaftTransportException) {
@@ -380,6 +442,7 @@ class RaftRuntime(
             }
             snapshotAttempts.remove(peerId)
             node = round.leader.handleInstallSnapshotResponse(peerId, attempt.request, response)
+            logReplicationResult(peerId, true)
             settlePending()
             isCurrentLeader(round)
         }
@@ -412,6 +475,7 @@ class RaftRuntime(
             }
             appendAttempts.remove(peerId)
             node = round.leader.handleAppendEntriesResponse(peerId, attempt.request, response)
+            logReplicationResult(peerId, response.success)
             settlePending()
             !response.success && isCurrentLeader(round)
         }
@@ -435,12 +499,48 @@ class RaftRuntime(
         node.persistentStateStore.save(term, null)
         node.persistentState.currentTerm = term
         node.persistentState.votedFor = null
+        val previous = node
         node = node.follower()
+        logLeadershipTransition(previous, node)
         appendAttempts.clear()
         snapshotAttempts.clear()
         settlePending()
         node.timer.reset(RaftTimeoutEvent.Election)
         return true
+    }
+
+    /** リーダー昇格/降格を検出して記録する。 */
+    private fun logLeadershipTransition(from: RaftNode, to: RaftNode) {
+        if (from is LeaderNode && to !is LeaderNode) {
+            logger.warn(
+                RaftLogEvents.COMPONENT_RUNTIME,
+                RaftLogEvents.LEADER_DEMOTED,
+                mapOf("term" to to.persistentState.currentTerm.toString()),
+            )
+        } else if (from !is LeaderNode && to is LeaderNode) {
+            logger.info(
+                RaftLogEvents.COMPONENT_RUNTIME,
+                RaftLogEvents.LEADER_ELECTED,
+                mapOf("term" to to.persistentState.currentTerm.toString()),
+            )
+        }
+    }
+
+    /** レプリケーション成否を記録する。 */
+    private fun logReplicationResult(peerId: String, success: Boolean) {
+        if (success) {
+            logger.debug(
+                RaftLogEvents.COMPONENT_RUNTIME,
+                RaftLogEvents.REPLICATION_SUCCEEDED,
+                mapOf("peerId" to peerId),
+            )
+        } else {
+            logger.warn(
+                RaftLogEvents.COMPONENT_RUNTIME,
+                RaftLogEvents.REPLICATION_FAILED,
+                mapOf("peerId" to peerId),
+            )
+        }
     }
 
     private fun settlePending() {

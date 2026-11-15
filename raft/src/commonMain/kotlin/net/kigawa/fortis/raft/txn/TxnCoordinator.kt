@@ -1,5 +1,7 @@
 package net.kigawa.fortis.raft.txn
 
+import net.kigawa.fortis.raft.logging.RaftLogEvents
+import net.kigawa.fortis.raft.logging.RaftLogger
 import net.kigawa.fortis.raft.metrics.FortisMetrics
 import net.kigawa.fortis.raft.metrics.RaftMetrics
 import net.kigawa.fortis.storage.engine.ByteArrayKey
@@ -19,12 +21,21 @@ import net.kigawa.fortis.storage.engine.ByteArrayKey
  *
  * @param metrics 非 null なら commit/abort の確定時に
  * [RaftMetrics.TXN_COMMITTED]/[RaftMetrics.TXN_ABORTED] を加算する。
+ * @param logger 非 null なら commit/abort 時に構造化ログを出力する。
  */
 class TxnCoordinator(
     participants: Map<String, TxnParticipant>,
     private val idGenerator: TxnIdGenerator = TxnIdGenerator(),
     private val metrics: FortisMetrics? = null,
+    private val logger: RaftLogger?,
 ) {
+    /** 既存のコンストラクタを維持し、ログ出力を無効にして生成する。 */
+    constructor(
+        participants: Map<String, TxnParticipant>,
+        idGenerator: TxnIdGenerator = TxnIdGenerator(),
+        metrics: FortisMetrics? = null,
+    ) : this(participants, idGenerator, metrics, null)
+
     val participants: Map<String, TxnParticipant> = participants.toMap()
     private val records: MutableMap<TxnId, TxnRecord> = mutableMapOf()
 
@@ -100,6 +111,11 @@ class TxnCoordinator(
             if (groups.isEmpty()) {
                 record.state = TxnState.COMMITTED
                 metrics?.incrementCounter(RaftMetrics.TXN_COMMITTED)
+                logger?.info(
+                    RaftLogEvents.COMPONENT_TXN,
+                    RaftLogEvents.TXN_COMMITTED,
+                    mapOf("txnId" to record.id.toString()),
+                )
                 return true
             }
             record.state = TxnState.PREPARING
@@ -110,6 +126,11 @@ class TxnCoordinator(
                     for (done in prepared) done.abort(record)
                     record.state = TxnState.ABORTED
                     metrics?.incrementCounter(RaftMetrics.TXN_ABORTED)
+                    logger?.warn(
+                        RaftLogEvents.COMPONENT_TXN,
+                        RaftLogEvents.TXN_ABORTED,
+                        mapOf("txnId" to record.id.toString()),
+                    )
                     return false
                 }
                 prepared.add(participant)
@@ -127,10 +148,20 @@ class TxnCoordinator(
                 }
                 record.state = TxnState.ABORTED
                 metrics?.incrementCounter(RaftMetrics.TXN_ABORTED)
+                logger?.warn(
+                    RaftLogEvents.COMPONENT_TXN,
+                    RaftLogEvents.TXN_ABORTED,
+                    mapOf("txnId" to record.id.toString()),
+                )
                 throw cause
             }
             record.state = TxnState.COMMITTED
             metrics?.incrementCounter(RaftMetrics.TXN_COMMITTED)
+            logger?.info(
+                RaftLogEvents.COMPONENT_TXN,
+                RaftLogEvents.TXN_COMMITTED,
+                mapOf("txnId" to record.id.toString()),
+            )
             return true
         }
 
@@ -141,6 +172,11 @@ class TxnCoordinator(
             }
             record.state = TxnState.ABORTED
             metrics?.incrementCounter(RaftMetrics.TXN_ABORTED)
+            logger?.warn(
+                RaftLogEvents.COMPONENT_TXN,
+                RaftLogEvents.TXN_ABORTED,
+                mapOf("txnId" to record.id.toString()),
+            )
         }
 
         private fun requireParticipant(groupId: String): TxnParticipant =
@@ -166,6 +202,11 @@ class TxnCoordinator(
                 record.state = TxnState.ABORTED
                 metrics?.incrementCounter(RaftMetrics.TXN_ABORTED)
                 count += 1
+                logger?.warn(
+                    RaftLogEvents.COMPONENT_TXN,
+                    RaftLogEvents.TXN_ABORTED,
+                    mapOf("txnId" to record.id.toString()),
+                )
             }
         }
         return count
