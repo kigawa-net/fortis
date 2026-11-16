@@ -9,19 +9,68 @@ import net.kigawa.fortis.io.fs.openWrite
 import net.kigawa.fortis.raft.log.codec.RaftLogCodec
 import net.kigawa.fortis.raft.log.codec.RaftLogDecodeResult
 
+import net.kigawa.fortis.raft.snapshot.SnapshotMetadata
+import net.kigawa.fortis.raft.snapshot.replaceSnapshotFile
+import net.kigawa.fortis.raft.snapshot.snapshotChecksum
+import net.kigawa.fortis.raft.snapshot.syncSnapshotFile
+
 class FileRaftLog private constructor(
     private val file: FortisFile,
     private val codec: RaftLogCodec,
     private val index: MutableMap<Long, RaftLogIndexEntry>,
     private var fileSize: Long,
+    private var base: SnapshotMetadata? = null,
 ) : RaftLog {
     private val mutex = Mutex()
+    private var publicationFailed = false
+
+    private fun checkPublication() {
+        check(!publicationFailed) { "Raft log publication failed; reopen before continuing" }
+    }
+
+    override suspend fun snapshotMetadata(): SnapshotMetadata? = mutex.withLock { checkPublication(); base }
+
+    override suspend fun compactThrough(metadata: SnapshotMetadata, appliedIndex: Long) = mutex.withLock {
+        checkPublication()
+        require(appliedIndex >= metadata.lastIncludedIndex) { "Snapshot is not applied" }
+        require(metadata.lastIncludedIndex >= (base?.lastIncludedIndex ?: 0))
+        if (metadata == base) return@withLock
+        require(base?.lastIncludedIndex != metadata.lastIncludedIndex) { "Snapshot boundary term mismatch" }
+        val boundary = index[metadata.lastIncludedIndex]?.let { codec.decode(readExact(it.offset, it.length)) }
+        val matches = (boundary as? RaftLogDecodeResult.Success)?.entry?.term == metadata.lastIncludedTerm
+        val kept = if (matches) index.filterKeys { it > metadata.lastIncludedIndex }.toList().sortedBy { it.first }.toMap() else emptyMap()
+        val bytes = ByteArray(24 + kept.values.sumOf { it.length })
+        BASE_MAGIC.copyInto(bytes)
+        writeBoundaryLong(bytes, 4, metadata.lastIncludedIndex)
+        writeBoundaryLong(bytes, 12, metadata.lastIncludedTerm)
+        val nextIndex = linkedMapOf<Long, RaftLogIndexEntry>()
+        val checksum = snapshotChecksum(bytes, 20)
+        for (i in 0 until 4) bytes[20 + i] = (checksum ushr (24 - i * 8)).toByte()
+        var offset = 24
+        for ((entryIndex, entry) in kept) {
+            readExact(entry.offset, entry.length).copyInto(bytes, offset)
+            nextIndex[entryIndex] = RaftLogIndexEntry(offset.toLong(), entry.length)
+            offset += entry.length
+        }
+        try {
+            replaceSnapshotFile(file, bytes)
+        } catch (failure: Throwable) {
+            publicationFailed = true
+            throw failure
+        }
+        index.clear()
+        index.putAll(nextIndex)
+        fileSize = bytes.size.toLong()
+        base = metadata
+    }
 
     override suspend fun lastIndex(): Long = mutex.withLock {
-        index.keys.maxOrNull() ?: 0L
+        checkPublication()
+        index.keys.maxOrNull() ?: base?.lastIncludedIndex ?: 0L
     }
 
     override suspend fun get(index: Long): RaftLogEntry? = mutex.withLock {
+        checkPublication()
         if (index <= 0) return@withLock null
         val indexedEntry = this.index[index] ?: return@withLock null
         val bytes = readExact(indexedEntry.offset, indexedEntry.length)
@@ -46,7 +95,8 @@ class FileRaftLog private constructor(
     }
 
     override suspend fun append(entry: RaftLogEntry) = mutex.withLock {
-        val lastIndex = index.keys.maxOrNull() ?: 0L
+        checkPublication()
+        val lastIndex = index.keys.maxOrNull() ?: base?.lastIncludedIndex ?: 0L
         require(entry.index == lastIndex + 1) {
             "Raft log index must be contiguous"
         }
@@ -72,7 +122,8 @@ class FileRaftLog private constructor(
     }
 
     override suspend fun truncateFrom(index: Long) = mutex.withLock {
-        require(index > 0) { "Raft log index must be positive" }
+        checkPublication()
+        require(index > (base?.lastIncludedIndex ?: 0)) { "Raft log index must be positive" }
         val firstRemoved = this.index[index] ?: return@withLock
         file.openWrite(isCreate = true) { output ->
             output.truncate(firstRemoved.offset)
@@ -108,6 +159,18 @@ class FileRaftLog private constructor(
     }
 
     companion object {
+        private val BASE_MAGIC = byteArrayOf(70, 82, 76, 66)
+
+        private fun writeBoundaryLong(bytes: ByteArray, offset: Int, value: Long) {
+            for (i in 0 until 8) bytes[offset + i] = (value ushr (56 - i * 8)).toByte()
+        }
+
+        private fun readBoundaryLong(bytes: ByteArray, offset: Int): Long {
+            var value = 0L
+            for (i in 0 until 8) value = (value shl 8) or (bytes[offset + i].toLong() and 255L)
+            return value
+        }
+
         suspend fun open(
             file: FortisFile,
             codec: RaftLogCodec = RaftLogCodec(),
@@ -117,11 +180,24 @@ class FileRaftLog private constructor(
                 return FileRaftLog(file, codec, mutableMapOf(), 0)
             }
             val index = linkedMapOf<Long, RaftLogIndexEntry>()
+            var base: SnapshotMetadata? = null
             var offset = 0
+            if (data.size >= 4 && data.copyOfRange(0, 4).contentEquals(BASE_MAGIC)) {
+                if (data.size < 24) throw RaftLogCorruptionException("Incomplete Raft log boundary")
+                base = try {
+                    SnapshotMetadata(readBoundaryLong(data, 4), readBoundaryLong(data, 12))
+                } catch (cause: IllegalArgumentException) {
+                    throw RaftLogCorruptionException("Invalid Raft log boundary")
+                }
+                var checksum = 0
+                for (i in 20 until 24) checksum = (checksum shl 8) or (data[i].toInt() and 255)
+                if (checksum != snapshotChecksum(data, 20)) throw RaftLogCorruptionException("Corrupted Raft log boundary")
+                offset = 24
+            }
             while (offset < data.size) {
                 when (val result = codec.decode(data, offset)) {
                     is RaftLogDecodeResult.Success -> {
-                        val expectedIndex = index.size + 1L
+                        val expectedIndex = (base?.lastIncludedIndex ?: 0L) + index.size + 1L
                         if (result.entry.index != expectedIndex) {
                             throw RaftLogCorruptionException(
                                 "Non-contiguous Raft log index at offset $offset: " +
@@ -150,7 +226,8 @@ class FileRaftLog private constructor(
                     }
                 }
             }
-            return FileRaftLog(file, codec, index, offset.toLong())
+            if (base != null) syncSnapshotFile(file)
+            return FileRaftLog(file, codec, index, offset.toLong(), base)
         }
 
         private suspend fun readAll(file: FortisFile): ByteArray? {

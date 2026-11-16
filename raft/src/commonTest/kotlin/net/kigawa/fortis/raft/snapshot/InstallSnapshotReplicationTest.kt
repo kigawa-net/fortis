@@ -25,6 +25,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
+import kotlin.test.assertNull
 
 // Runtime 経由の InstallSnapshot 受付と leader→follower 追従を確認する
 class InstallSnapshotReplicationTest {
@@ -44,7 +45,8 @@ class InstallSnapshotReplicationTest {
 
         assertEquals(3, response.term)
         assertIs<FollowerNode>(fixture.runtime.currentNode)
-        assertEquals(0, fixture.log.lastIndex())
+        assertEquals(3, fixture.log.lastIndex())
+        assertNull(fixture.log.get(3))
         assertEquals(3, fixture.volatileState.commitIndex)
         assertEquals(3, fixture.volatileState.lastApplied)
         assertEquals(1, fixture.applied.size)
@@ -63,7 +65,7 @@ class InstallSnapshotReplicationTest {
                 data = byteArrayOf(1),
             ),
         )
-        fixture.appendEntries(1L..1L, term = 3)
+        fixture.appendEntries(6L..6L, term = 3)
 
         val response = fixture.runtime.handleInstallSnapshot(
             InstallSnapshotRequest(
@@ -75,7 +77,7 @@ class InstallSnapshotReplicationTest {
         )
 
         assertEquals(3, response.term)
-        assertEquals(1, fixture.log.lastIndex())
+        assertEquals(6, fixture.log.lastIndex())
         assertEquals(5, fixture.volatileState.commitIndex)
         assertEquals(1, fixture.applied.size)
     }
@@ -161,7 +163,8 @@ class InstallSnapshotReplicationTest {
         assertEquals(6, progress.nextIndex)
         assertEquals(5, progress.matchIndex)
         assertEquals(5, lagging.log.lastIndex())
-        assertEquals(commands, (2L..5L).map { lagging.log.get(it)?.command })
+        assertNull(lagging.log.get(3))
+        assertEquals(commands.drop(2), (4L..5L).map { lagging.log.get(it)?.command })
         assertEquals(5, lagging.volatileState.commitIndex)
         assertEquals(5, lagging.volatileState.lastApplied)
         // idx1..3 はスナップショット側で吸収されたため、状態機械には idx4..5 のみ適用される

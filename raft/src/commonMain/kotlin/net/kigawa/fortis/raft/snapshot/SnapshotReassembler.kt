@@ -1,24 +1,12 @@
 package net.kigawa.fortis.raft.snapshot
 
-/**
- * チャンク分割されたスナップショット受信側の再構成器。
- *
- * [InstallSnapshotChunks.chunked] で分割された [InstallSnapshotChunk] を
- * [offset] の連続性・重複・[metadata] の一貫性・[isLast] の終端性を検証
- * しながら受け付け、終端片の受信完了時に再構成済み data を返す。
- * 紛失・重複・順序不正・不一致は例外で拒否する。未完成の受信状態は
- * [discard] で破棄できる。完成後の受付と終端後の追加受付は拒否する。
- *
- * 単一メッセージの [InstallSnapshotRequest] 経路は残し、本器は追加の
- * 転送経路として使う。Transport/codec への配線と base-index 前方圧縮は
- * 将来課題とする。
- */
+/** 任期・送信元・境界・オフセットを検証してチャンクを再構成する。 */
 class SnapshotReassembler {
     private var term: Long? = null
     private var leaderId: String? = null
     private var metadata: SnapshotMetadata? = null
     private var nextOffset: Long = 0
-    private val received = ArrayList<Byte>()
+    private val received = ArrayList<ByteArray>()
     private var complete = false
 
     /** 次に受け付けるべきオフセット。 */
@@ -64,13 +52,18 @@ class SnapshotReassembler {
                 "スナップショットチャンクが欠落している"
             }
         }
-        for (byte in chunk.data) {
-            received.add(byte)
-        }
+        require(nextOffset + chunk.data.size <= Int.MAX_VALUE) { "スナップショットが大きすぎる" }
+        received.add(chunk.data.copyOf())
         nextOffset += chunk.data.size
         if (chunk.isLast) {
             complete = true
-            return received.toByteArray()
+            val result = ByteArray(nextOffset.toInt())
+            var offset = 0
+            for (part in received) {
+                part.copyInto(result, offset)
+                offset += part.size
+            }
+            return result
         }
         return null
     }

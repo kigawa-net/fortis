@@ -5,6 +5,9 @@ import net.kigawa.fortis.raft.RaftStateMachine
 import net.kigawa.fortis.raft.follower.FollowerNode
 import net.kigawa.fortis.raft.log.RaftLog
 import net.kigawa.fortis.raft.vote.RaftVolatileState
+import net.kigawa.fortis.raft.snapshot.FileRaftSnapshotStore
+import net.kigawa.fortis.raft.snapshot.RaftSnapshotApplier
+import net.kigawa.fortis.raft.snapshot.RaftSnapshotRecovery
 
 data class RaftNodeBuilder(
     val nodeId: String,
@@ -15,14 +18,28 @@ data class RaftNodeBuilder(
     val stateMachine: RaftStateMachine,
     val timer: RaftTimer = RaftTimer.None,
 ) {
-    suspend fun build(): FollowerNode = FollowerNode(
-        nodeId,
-        peerIds,
-        persistentStateStore.load(),
-        persistentStateStore,
-        volatileState,
-        log,
-        stateMachine,
-        timer,
-    )
+    suspend fun build(
+        snapshotStore: FileRaftSnapshotStore? = null,
+        snapshotApplier: RaftSnapshotApplier = RaftSnapshotApplier.NoOp,
+    ): FollowerNode {
+        if (snapshotStore != null) {
+            RaftSnapshotRecovery.restore(snapshotStore, log, volatileState, snapshotApplier)
+        } else {
+            check(log.snapshotMetadata() == null) { "Compacted log requires snapshot recovery" }
+        }
+        val state = persistentStateStore.load()
+        check(state.currentTerm >= (log.snapshotMetadata()?.lastIncludedTerm ?: 0)) {
+            "Persistent term is older than snapshot"
+        }
+        return FollowerNode(
+            nodeId,
+            peerIds,
+            state,
+            persistentStateStore,
+            volatileState,
+            log,
+            stateMachine,
+            timer,
+        )
+    }
 }

@@ -43,7 +43,8 @@ class InstallSnapshotHandlerTest {
         assertNull(fixture.persistentState.votedFor)
         assertEquals(1, fixture.timerResets)
         // 境界エントリとターム不一致の新規スナップショットのためログ全体が圧縮される
-        assertEquals(0, fixture.log.lastIndex())
+        assertEquals(3, fixture.log.lastIndex())
+        assertNull(fixture.log.get(3))
         assertEquals(3, fixture.volatileState.commitIndex)
         assertEquals(3, fixture.volatileState.lastApplied)
         assertEquals(1, fixture.applied.size)

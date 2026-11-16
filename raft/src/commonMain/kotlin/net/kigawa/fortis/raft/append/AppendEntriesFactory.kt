@@ -31,7 +31,7 @@ class AppendEntriesFactory(
             if (prevLogIndex == 0L) {
                 0L
             } else {
-                log.get(prevLogIndex)?.term
+                log.termAt(prevLogIndex)
                     ?: error("Missing previous log entry")
             }
 

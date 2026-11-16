@@ -1,13 +1,6 @@
 package net.kigawa.fortis.raft.snapshot
 
-/**
- * チャンク分割されたスナップショット送信側の分割ヘルパー。
- *
- * [data] を [maxChunkBytes] 以下の [InstallSnapshotChunk] 列に分割する。
- * 単一メッセージの [InstallSnapshotRequest] 経路は残し、本ヘルパーは
- * 追加の転送経路として使う。Transport/codec への配線と base-index
- * 前方圧縮は将来課題とする。
- */
+/** スナップショットを転送上限に合わせて分割する。 */
 object InstallSnapshotChunks {
     /**
      * スナップショットデータをチャンク列に分割する。
@@ -41,11 +34,11 @@ object InstallSnapshotChunks {
             )
         }
         val chunks = ArrayList<InstallSnapshotChunk>(
-            (data.size + maxChunkBytes - 1) / maxChunkBytes,
+            ((data.size.toLong() + maxChunkBytes - 1) / maxChunkBytes).toInt(),
         )
         var offset = 0
         while (offset < data.size) {
-            val end = minOf(offset + maxChunkBytes, data.size)
+            val end = offset + minOf(maxChunkBytes, data.size - offset)
             chunks.add(
                 InstallSnapshotChunk(
                     term = term,

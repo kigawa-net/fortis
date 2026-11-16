@@ -48,13 +48,13 @@ class AppendEntriesHandler(
     private suspend fun previousEntryMatches(
         request: AppendEntriesRequest,
     ): Boolean {
+        val base = log.snapshotMetadata()?.lastIncludedIndex ?: 0L
+        if (request.prevLogIndex < base) return request.entries.isEmpty() && request.leaderCommit == 0L
         if (request.prevLogIndex == 0L) {
             return true
         }
 
-        val previousEntry =
-            log.get(request.prevLogIndex) ?: return false
-        return previousEntry.term == request.prevLogTerm
+        return log.termAt(request.prevLogIndex) == request.prevLogTerm
     }
 
     private suspend fun appendEntries(

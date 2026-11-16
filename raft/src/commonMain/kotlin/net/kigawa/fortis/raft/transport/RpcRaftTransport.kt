@@ -2,6 +2,8 @@ package net.kigawa.fortis.raft.transport
 
 import net.kigawa.fortis.raft.append.AppendEntriesRequest
 import net.kigawa.fortis.raft.append.AppendEntriesResponse
+import net.kigawa.fortis.raft.snapshot.InstallSnapshotChunk
+import net.kigawa.fortis.raft.snapshot.InstallSnapshotChunkResponse
 import net.kigawa.fortis.raft.snapshot.InstallSnapshotRequest
 import net.kigawa.fortis.raft.snapshot.InstallSnapshotResponse
 import net.kigawa.fortis.raft.transport.codec.RaftRpcCodec
@@ -43,6 +45,12 @@ class RpcRaftTransport(
         is RaftRpcMessage.InstallSnapshotResult -> response.response
         else -> throw unexpectedResponse(response)
     }
+
+    override suspend fun installSnapshotChunk(peerId: String, chunk: InstallSnapshotChunk): InstallSnapshotChunkResponse =
+        when (val response = request(peerId, RaftRpcMessage.SnapshotChunk(chunk))) {
+            is RaftRpcMessage.SnapshotChunkResult -> response.response
+            else -> throw unexpectedResponse(response)
+        }
 
     private suspend fun request(
         peerId: String,

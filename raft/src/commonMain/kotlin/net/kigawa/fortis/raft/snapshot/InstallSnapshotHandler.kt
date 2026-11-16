@@ -9,23 +9,7 @@ import net.kigawa.fortis.raft.node.RaftTimeoutEvent
 import net.kigawa.fortis.raft.node.RaftTimer
 import net.kigawa.fortis.raft.vote.RaftVolatileState
 
-/**
- * 単一メッセージの InstallSnapshot RPC 受信処理。
- *
- * 受信 term が現 term 以上なら選挙タイマーをリセットする。term が進む場合は
- * 永続状態を保存して追随する。スナップショットが現ログより新しい場合のみ
- * ログを切り詰めてスナップショットを反映し、古いスナップショットは無視して
- * 現 term で応答する。
- *
- * 暫定仕様として、境界エントリが欠落またはターム不一致の場合はローカルログ全体を
- * 破棄する（[RaftLog.truncateFrom] のみで前方圧縮ができないため）。
- * 境界エントリのタームが一致する場合は後続エントリを保持し、境界以前の物理的な
- * 前方圧縮（base-index 対応）は将来課題とする。
- *
- * 適用したスナップショットは [snapshotStore] が設定されている場合に永続化され、
- * 再起動後は [FileRaftSnapshotStore.open] で読み戻せる。[RaftTimer] を除く
- * Runtime への配線とチャンク分割転送は将来課題である。
- */
+/** スナップショットを保存・適用してからログを圧縮する。 */
 class InstallSnapshotHandler(
     private val persistentState: RaftPersistentState,
     private val persistentStateStore: RaftPersistentStateStore,
@@ -37,6 +21,7 @@ class InstallSnapshotHandler(
     private val snapshotStore: FileRaftSnapshotStore? = null,
 ) {
     private val mutex = Mutex()
+    private val reassembler = SnapshotReassembler()
     private var lastIncludedIndex = initialLastIncludedIndex
         .also { require(it >= 0) { "適用済みスナップショットのインデックスは負であってはならない" } }
 
@@ -55,28 +40,53 @@ class InstallSnapshotHandler(
 
         timer.reset(RaftTimeoutEvent.Election)
 
-        if (request.metadata.lastIncludedIndex <= lastIncludedIndex) {
+        if (request.metadata.lastIncludedIndex <= maxOf(lastIncludedIndex, volatileState.commitIndex)) {
             return@withLock InstallSnapshotResponse(persistentState.currentTerm)
         }
 
+        reassembler.discard()
         installSnapshot(request.metadata, request.data)
         InstallSnapshotResponse(persistentState.currentTerm)
+    }
+
+    /** チャンクを受信し、終端まで状態機械を変更しない。開始片で再送を開始できる。 */
+    suspend fun handleChunk(chunk: InstallSnapshotChunk): InstallSnapshotChunkResponse = mutex.withLock {
+        if (chunk.term < persistentState.currentTerm) {
+            return@withLock InstallSnapshotChunkResponse(persistentState.currentTerm, false, 0)
+        }
+        if (chunk.term > persistentState.currentTerm) {
+            persistentStateStore.save(chunk.term, null)
+            persistentState.currentTerm = chunk.term
+            persistentState.votedFor = null
+            reassembler.discard()
+        }
+        timer.reset(RaftTimeoutEvent.Election)
+        if (chunk.offset == 0L) reassembler.discard()
+        val data = try {
+            reassembler.accept(chunk)
+        } catch (_: IllegalArgumentException) {
+            reassembler.discard()
+            return@withLock InstallSnapshotChunkResponse(persistentState.currentTerm, false, 0)
+        }
+        val nextOffset = reassembler.expectedOffset
+        if (data != null) {
+            reassembler.discard()
+            if (chunk.metadata.lastIncludedIndex > maxOf(lastIncludedIndex, volatileState.commitIndex)) {
+                installSnapshot(chunk.metadata, data)
+            }
+        }
+        InstallSnapshotChunkResponse(persistentState.currentTerm, true, nextOffset)
     }
 
     private suspend fun installSnapshot(
         metadata: SnapshotMetadata,
         data: ByteArray,
     ) {
-        val boundary = log.get(metadata.lastIncludedIndex)
-        if (boundary?.term != metadata.lastIncludedTerm) {
-            if (log.lastIndex() > 0) {
-                log.truncateFrom(1)
-            }
-        }
-        snapshotApplier.apply(metadata, data)
         snapshotStore?.save(metadata, data)
+        snapshotApplier.apply(metadata, data)
         volatileState.commitIndex = maxOf(volatileState.commitIndex, metadata.lastIncludedIndex)
         volatileState.lastApplied = maxOf(volatileState.lastApplied, metadata.lastIncludedIndex)
+        log.compactThrough(metadata, volatileState.lastApplied)
         lastIncludedIndex = metadata.lastIncludedIndex
     }
 }

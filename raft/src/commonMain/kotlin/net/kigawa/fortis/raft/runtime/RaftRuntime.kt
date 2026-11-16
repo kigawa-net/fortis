@@ -33,6 +33,10 @@ import net.kigawa.fortis.raft.snapshot.InstallSnapshotHandler
 import net.kigawa.fortis.raft.snapshot.RaftSnapshotApplier
 import net.kigawa.fortis.raft.snapshot.RaftSnapshotProvider
 import net.kigawa.fortis.raft.snapshot.SnapshotMetadata
+import net.kigawa.fortis.raft.snapshot.FileRaftSnapshotStore
+import net.kigawa.fortis.raft.snapshot.InstallSnapshotChunk
+import net.kigawa.fortis.raft.snapshot.InstallSnapshotChunkResponse
+import net.kigawa.fortis.raft.snapshot.InstallSnapshotChunks
 import net.kigawa.fortis.raft.transport.RaftTransport
 import net.kigawa.fortis.raft.transport.RaftTransportException
 import net.kigawa.fortis.raft.vote.RequestVoteRequest
@@ -46,6 +50,8 @@ class RaftRuntime(
     private val snapshotApplier: RaftSnapshotApplier = RaftSnapshotApplier.NoOp,
     private val snapshotProvider: RaftSnapshotProvider? = null,
     private val logger: RaftLogger,
+    private val snapshotStore: FileRaftSnapshotStore? = null,
+    private val snapshotChunkBytes: Int? = null,
 ) {
     /** 既存のコンストラクタを維持し、ログ出力を無効にして生成する。 */
     constructor(
@@ -55,6 +61,20 @@ class RaftRuntime(
         snapshotApplier: RaftSnapshotApplier = RaftSnapshotApplier.NoOp,
         snapshotProvider: RaftSnapshotProvider? = null,
     ) : this(initialNode, transport, proposalCoroutineContext, snapshotApplier, snapshotProvider, NoOpLogger)
+
+    /** 永続化と分割転送を設定して生成する。 */
+    constructor(
+        initialNode: RaftNode,
+        transport: RaftTransport,
+        snapshotStore: FileRaftSnapshotStore?,
+        snapshotChunkBytes: Int? = null,
+        proposalCoroutineContext: CoroutineContext = Dispatchers.Default,
+        snapshotApplier: RaftSnapshotApplier = RaftSnapshotApplier.NoOp,
+        snapshotProvider: RaftSnapshotProvider? = null,
+    ) : this(initialNode, transport, proposalCoroutineContext, snapshotApplier, snapshotProvider, NoOpLogger,
+        snapshotStore, snapshotChunkBytes)
+
+    init { require(snapshotChunkBytes == null || snapshotChunkBytes > 0) }
 
     private val mutex = Mutex()
     private val peerRpcMutexes = initialNode.peerIds.associateWith { Mutex() }
@@ -68,6 +88,8 @@ class RaftRuntime(
         initialNode.log,
         initialNode.timer,
         snapshotApplier,
+        initialLastIncludedIndex = initialNode.volatileState.lastApplied,
+        snapshotStore = snapshotStore,
     )
     private val proposalJob = SupervisorJob(proposalCoroutineContext[Job])
     private val proposalScope = CoroutineScope(proposalCoroutineContext + proposalJob)
@@ -114,12 +136,7 @@ class RaftRuntime(
         result.value
     }
 
-    /**
-     * 単一メッセージの InstallSnapshot 要求を受け付ける。
-     * 既存 [InstallSnapshotHandler] に委譲し、有効なリーダー任期なら
-     * フォロワーへ遷移する。チャンク分割転送とスナップショット自体の
-     * 永続化は将来課題。
-     */
+    /** 単一メッセージのInstallSnapshotを受け付け、有効な任期なら降格する。 */
     suspend fun handleInstallSnapshot(
         request: InstallSnapshotRequest,
     ): InstallSnapshotResponse = mutex.withLock {
@@ -140,6 +157,28 @@ class RaftRuntime(
         logLeadershipTransition(previous, node)
         settlePending()
         response
+    }
+
+    /** 分割されたInstallSnapshotを受信する。 */
+    suspend fun handleInstallSnapshotChunk(chunk: InstallSnapshotChunk): InstallSnapshotChunkResponse = mutex.withLock {
+        val previousTerm = node.persistentState.currentTerm
+        val response = snapshotHandler.handleChunk(chunk)
+        if (chunk.term >= previousTerm && node !is FollowerNode) node = node.follower()
+        settlePending()
+        response
+    }
+
+    /** 適用済み状態を保存してから前方ログを圧縮する。 */
+    suspend fun saveSnapshot(metadata: SnapshotMetadata, data: ByteArray) = mutex.withLock {
+        check(node.volatileState.lastApplied >= metadata.lastIncludedIndex) { "Snapshot is not applied" }
+        require(node.log.termAt(metadata.lastIncludedIndex) == metadata.lastIncludedTerm) { "Snapshot term mismatch" }
+        require(metadata.lastIncludedIndex >= (node.log.snapshotMetadata()?.lastIncludedIndex ?: 0L)) {
+            "Snapshot must not move backwards"
+        }
+        val store = checkNotNull(snapshotStore) { "Snapshot store is required for compaction" }
+        store.save(metadata, data)
+        node.log.compactThrough(metadata, node.volatileState.lastApplied)
+        (node as? LeaderNode)?.updateSnapshotMetadata(metadata)
     }
 
     suspend fun onElectionTimeout() {
@@ -370,23 +409,13 @@ class RaftRuntime(
         round: LeaderRound,
         peerId: String,
     ) {
-        // 同一呼び出し内で同一境界の再送を抑止する暫定ガード。
-        // base-index 未対応の現状では再送が収束しないため、2回目以降は
-        // AppendEntries で巻き戻す（リーダーログは未圧縮のため到達可能）。
-        // 呼び出しごとに作り直すため、次回 replicate での再送は妨げない。
-        var lastSentSnapshotIndex: Long? = null
         while (true) {
             val needed = mutex.withLock {
                 if (!isCurrentLeader(round)) return
-                snapshotProvider?.let { round.leader.snapshotFor(peerId) }
+                if (snapshotProvider != null || snapshotStore != null) round.leader.snapshotFor(peerId) else null
             }
-            val metadata = if (needed != null && needed.lastIncludedIndex == lastSentSnapshotIndex) {
-                null
-            } else {
-                needed
-            }
+            val metadata = needed
             if (metadata != null) {
-                lastSentSnapshotIndex = metadata.lastIncludedIndex
                 if (!replicateSnapshot(round, peerId, metadata)) return
             } else {
                 if (!replicateAppend(round, peerId)) return
@@ -395,7 +424,7 @@ class RaftRuntime(
     }
 
     /**
-     * InstallSnapshot を1往復送る。継続する場合に真を返す。
+     * スナップショットを送信し、終端確認後に複製位置を進める。
      * 送信は mutex を保持せずに行い、[snapshotProvider] の取得失敗時は
      * 複製を打ち切る（呼び出し側の供給責務）。
      */
@@ -404,9 +433,11 @@ class RaftRuntime(
         peerId: String,
         metadata: SnapshotMetadata,
     ): Boolean {
-        val provider = snapshotProvider ?: return false
         val data = try {
-            provider.snapshotData(metadata)
+            snapshotProvider?.snapshotData(metadata) ?: snapshotStore?.load()?.let {
+                check(it.first == metadata) { "Snapshot generation changed" }
+                it.second
+            } ?: return false
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
@@ -414,7 +445,9 @@ class RaftRuntime(
         }
         val attempt = mutex.withLock {
             if (!isCurrentLeader(round)) return false
-            SnapshotAttempt(round, round.leader.createInstallSnapshot(peerId, data)).also {
+            val request = round.leader.createInstallSnapshot(peerId, data)
+            if (request.metadata != metadata) return false
+            SnapshotAttempt(round, request).also {
                 snapshotAttempts[peerId] = it
             }
         }
@@ -427,7 +460,20 @@ class RaftRuntime(
             ),
         )
         val response = try {
-            transport.installSnapshot(peerId, attempt.request)
+            val limit = snapshotChunkBytes
+            if (limit == null) {
+                transport.installSnapshot(peerId, attempt.request)
+            } else {
+                for (chunk in InstallSnapshotChunks.chunked(attempt.request.term, attempt.request.leaderId,
+                    metadata, data, limit)) {
+                    if (!mutex.withLock { isCurrentLeader(round) }) return false
+                    val result = transport.installSnapshotChunk(peerId, chunk)
+                    if (mutex.withLock { observeHigherTerm(result.term) }) return false
+                    if (result.term != attempt.request.term || !result.accepted ||
+                        result.nextOffset != chunk.offset + chunk.data.size) return false
+                }
+                InstallSnapshotResponse(attempt.request.term)
+            }
         } catch (_: RaftTransportException) {
             return false
         }

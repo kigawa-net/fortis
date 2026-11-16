@@ -11,6 +11,10 @@ class RaftRpcHandler(
     fun isKnownPeer(peerId: String): Boolean = peerId in peerIds
 
     suspend fun handle(message: RaftRpcMessage): RaftRpcMessage = when (message) {
+        is RaftRpcMessage.SnapshotChunk -> RaftRpcMessage.SnapshotChunkResult(
+            runtime.handleInstallSnapshotChunk(message.chunk),
+        )
+
         is RaftRpcMessage.RequestVote -> RaftRpcMessage.RequestVoteResult(
             runtime.handleRequestVote(message.request),
         )
@@ -23,6 +27,7 @@ class RaftRpcHandler(
             runtime.handleInstallSnapshot(message.request),
         )
 
+        is RaftRpcMessage.SnapshotChunkResult,
         is RaftRpcMessage.RequestVoteResult,
         is RaftRpcMessage.AppendEntriesResult,
         is RaftRpcMessage.InstallSnapshotResult,
