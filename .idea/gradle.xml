@@ -9,6 +9,7 @@
           <set>
             <option value="$PROJECT_DIR$" />
             <option value="$PROJECT_DIR$/io" />
+            <option value="$PROJECT_DIR$/raft" />
             <option value="$PROJECT_DIR$/storage-engine" />
           </set>
         </option>
