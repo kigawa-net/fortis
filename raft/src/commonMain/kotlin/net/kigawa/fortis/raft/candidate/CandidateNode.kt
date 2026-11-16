@@ -40,7 +40,7 @@ class CandidateNode(
             term = persistentState.currentTerm,
             candidateId = nodeId,
             lastLogIndex = lastLogIndex,
-            lastLogTerm = log.get(lastLogIndex)?.term ?: 0L,
+            lastLogTerm = log.termAt(lastLogIndex) ?: 0L,
         )
     }
 
@@ -103,6 +103,9 @@ class CandidateNode(
             stateMachine,
             timer,
             peerIds.associateWith { RaftPeerProgress(nextIndex = nextIndex) },
-        ).also { it.initializeLeadership() }
+        ).also {
+            it.updateSnapshotMetadata(log.snapshotMetadata())
+            it.initializeLeadership()
+        }
     }
 }

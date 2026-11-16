@@ -70,7 +70,7 @@ class LeaderNode(
     /**
      * リーダーが把握する最新のスナップショット境界。未設定時は従来通り
      * AppendEntries のみで複製する。設定はログ圧縮側の責務であり、
-     * スナップショット自体の永続化とチャンク分割転送は将来課題。
+     * 永続化と分割転送はRuntimeが行う。
      */
     var snapshotMetadata: SnapshotMetadata? = null
         private set

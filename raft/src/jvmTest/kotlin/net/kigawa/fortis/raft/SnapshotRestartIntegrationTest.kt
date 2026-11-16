@@ -70,20 +70,18 @@ class SnapshotRestartIntegrationTest {
 
             assertEquals(6, reopenedState.currentTerm)
             assertNull(reopenedState.votedFor)
-            // 圧縮後の空ログが復元される
-            assertEquals(0, reopenedLog.lastIndex())
-            // 復旧後のログは新規エントリを受け付けられる。
-            // 圧縮境界以降の番号付け（base-index 対応）は将来課題のため、
-            // 現状は先頭からの再採番になる。
+            // 圧縮境界の番号と任期を保持して追記する。
+            assertEquals(3, reopenedLog.lastIndex())
+            assertNull(reopenedLog.get(3))
             reopenedLog.append(
                 RaftLogEntry(
-                    index = 1,
+                    index = 4,
                     term = 6,
                     command = RaftCommand.Put(byteArrayOf(1), byteArrayOf(20)),
                 ),
             )
-            assertEquals(1, reopenedLog.lastIndex())
-            assertEquals(6, reopenedLog.get(1)?.term)
+            assertEquals(4, reopenedLog.lastIndex())
+            assertEquals(6, reopenedLog.get(4)?.term)
         }
     }
 

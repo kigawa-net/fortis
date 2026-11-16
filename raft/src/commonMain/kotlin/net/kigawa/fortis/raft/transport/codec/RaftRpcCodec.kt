@@ -6,6 +6,8 @@ import net.kigawa.fortis.raft.append.AppendEntriesRequest
 import net.kigawa.fortis.raft.append.AppendEntriesResponse
 import net.kigawa.fortis.raft.log.RaftLogEntry
 import net.kigawa.fortis.raft.log.RaftLogEntryPayload
+import net.kigawa.fortis.raft.snapshot.InstallSnapshotChunk
+import net.kigawa.fortis.raft.snapshot.InstallSnapshotChunkResponse
 import net.kigawa.fortis.raft.snapshot.InstallSnapshotRequest
 import net.kigawa.fortis.raft.snapshot.InstallSnapshotResponse
 import net.kigawa.fortis.raft.snapshot.SnapshotMetadata
@@ -30,6 +32,24 @@ class RaftRpcCodec(
     fun encode(message: RaftRpcMessage): ByteArray {
         val type: Byte
         val payload = when (message) {
+            is RaftRpcMessage.SnapshotChunk -> {
+                type = RaftRpcMessageType.INSTALL_SNAPSHOT_CHUNK
+                val chunk = message.chunk
+                val encoded = encodeInstallSnapshot(InstallSnapshotRequest(chunk.term, chunk.leaderId, chunk.metadata, chunk.data))
+                ByteArray(requirePayloadSize(encoded.size + 9)).also {
+                    encoded.copyInto(it)
+                    writeLong(it, encoded.size, chunk.offset)
+                    writeBoolean(it, encoded.size + 8, chunk.isLast)
+                }
+            }
+            is RaftRpcMessage.SnapshotChunkResult -> {
+                type = RaftRpcMessageType.INSTALL_SNAPSHOT_CHUNK_RESPONSE
+                ByteArray(requirePayloadSize(17)).also {
+                    writeLong(it, 0, message.response.term)
+                    writeBoolean(it, 8, message.response.accepted)
+                    writeLong(it, 9, message.response.nextOffset)
+                }
+            }
             is RaftRpcMessage.RequestVote -> {
                 type = RaftRpcMessageType.REQUEST_VOTE_REQUEST
                 encodeRequestVote(message.request)
@@ -196,7 +216,7 @@ class RaftRpcCodec(
 
     /**
      * 単一メッセージの InstallSnapshot 要求を符号化する。
-     * チャンク分割転送は将来課題とし、[data] 全体を1フレームに載せる。
+     * 既存形式として本文全体を1フレームに載せる。
      */
     private fun encodeInstallSnapshot(request: InstallSnapshotRequest): ByteArray {
         requireTerm(request.term)
@@ -297,6 +317,17 @@ class RaftRpcCodec(
         start: Int,
         end: Int,
     ): PayloadResult = when (type) {
+        RaftRpcMessageType.INSTALL_SNAPSHOT_CHUNK -> decodeSnapshotChunk(data, start, end)
+        RaftRpcMessageType.INSTALL_SNAPSHOT_CHUNK_RESPONSE -> {
+            if (end - start != 17) corrupted("Invalid chunk response length")
+            else {
+                val term = readLong(data, start)
+                val accepted = readBoolean(data[start + 8])
+                val next = readLong(data, start + 9)
+                if (term < 0 || accepted == null || next < 0) corrupted("Invalid chunk response")
+                else PayloadResult.Success(RaftRpcMessage.SnapshotChunkResult(InstallSnapshotChunkResponse(term, accepted, next)))
+            }
+        }
         RaftRpcMessageType.REQUEST_VOTE_REQUEST -> decodeRequestVote(data, start, end)
         RaftRpcMessageType.REQUEST_VOTE_RESPONSE -> decodeRequestVoteResponse(data, start, end)
         RaftRpcMessageType.APPEND_ENTRIES_REQUEST -> decodeAppendEntries(data, start, end)
@@ -304,6 +335,19 @@ class RaftRpcCodec(
         RaftRpcMessageType.INSTALL_SNAPSHOT_REQUEST -> decodeInstallSnapshot(data, start, end)
         RaftRpcMessageType.INSTALL_SNAPSHOT_RESPONSE -> decodeInstallSnapshotResponse(data, start, end)
         else -> corrupted("Unknown Raft RPC message type: $type")
+    }
+
+    private fun decodeSnapshotChunk(data: ByteArray, start: Int, end: Int): PayloadResult {
+        if (end - start < MIN_SNAPSHOT_SIZE + 9) return corrupted("Truncated snapshot chunk")
+        val decoded = decodeInstallSnapshot(data, start, end - 9)
+        if (decoded !is PayloadResult.Success) return decoded
+        val request = (decoded.message as RaftRpcMessage.InstallSnapshot).request
+        val offset = readLong(data, end - 9)
+        val last = readBoolean(data[end - 1]) ?: return corrupted("Invalid chunk terminator")
+        if (offset < 0 || (!last && request.data.isEmpty())) return corrupted("Invalid chunk offset or data")
+        return PayloadResult.Success(RaftRpcMessage.SnapshotChunk(InstallSnapshotChunk(
+            request.term, request.leaderId, request.metadata, offset, request.data, last,
+        )))
     }
 
     private fun decodeRequestVote(data: ByteArray, start: Int, end: Int): PayloadResult {
@@ -628,6 +672,8 @@ class RaftRpcCodec(
             'C'.code.toByte(),
         )
         private val MESSAGE_TYPES = setOf(
+            RaftRpcMessageType.INSTALL_SNAPSHOT_CHUNK,
+            RaftRpcMessageType.INSTALL_SNAPSHOT_CHUNK_RESPONSE,
             RaftRpcMessageType.REQUEST_VOTE_REQUEST,
             RaftRpcMessageType.REQUEST_VOTE_RESPONSE,
             RaftRpcMessageType.APPEND_ENTRIES_REQUEST,

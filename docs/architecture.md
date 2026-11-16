@@ -44,7 +44,7 @@ Operations / Performance
 | 層 | 実装（現状） | 責務 |
 | --- | --- | --- |
 | Raft | `raft/.../runtime`（`RaftRuntime`）、`leader`・`follower`・`candidate`、`transport`（`RaftTransport`、InMemory/Local）、`transport/netty`（QUIC + mTLS、JVM）、`log`（`FileRaftLog` / `MemoryRaftLog`）、`node` | 選出・複製・commit・適用。書き込みは leader の `propose`（majority commit + local apply 後に成功）。読みは `readIndex` / `linearizableRead` で quorum 確認後に local read |
-| Snapshot / Recovery | `raft/.../snapshot`（`InstallSnapshotHandler`、`RaftSnapshotApplier`）、`log` / `persistence`（crash-safe な term・vote・log） | 遅延 follower の catch-up、再起動復旧。現状は単一メッセージ受信のみ。チャンク分割転送・スナップショット自体の永続化・`RaftTimer` 以外の Runtime 配線は将来課題 |
+| Snapshot / Recovery | `raft/.../snapshot`（`InstallSnapshotHandler`、`RaftSnapshotApplier`）、`log` / `persistence`（crash-safe な term・vote・log） | 遅延 follower の catch-up、スナップショットの原子的永続化、チャンク分割RPC、base-index前方圧縮、再起動復旧 |
 | MVCC | `storage-engine/.../mvcc`（`VersionedFortisStorageEngine`、`MemoryMvccStorageEngine`、`MvccSnapshot`） | 版付き KV、スナップショット読み、tombstone、版ベース競合検証（`versionOf`）、pin（`retain` / `retainLatest` / `release`）、GC（`compact`） |
 | Range Sharding | `raft/.../sharding`（`RangeTable`、`KeyRange`、`MultiRaftRouter`） | 静的レンジ構成のルーティング計算。**ルーティング専用でストレージ I/O を行わない**。構成変更時は再構築。Runtime 配線・epoch・range scan は将来課題 |
 | Meta | `raft/.../meta`（`MetaStore`、`ClusterMembership`、`RangePlacement`、`RebalancePlanner`） | 構成・配置の版付き保持と移動計画の算出。現状はインメモリ。専用 Raft Group による複製・実データ移動は将来課題 |
@@ -53,6 +53,17 @@ Operations / Performance
 | Operations | `raft/.../metrics`（`FortisMetrics`、`RaftMetrics`、`InMemoryMetrics`、`NoOpMetrics`） | §8 の要点 |
 
 基盤として `io`（`Fs` / `Disks` / WAL 用 I/O）と `storage-engine`（Memory / WAL / Disk、`FortisStorageEngine`）を使う。Raft Log と State Machine 用ストレージは分離する。
+
+### スナップショットと復旧（#17）
+
+- `FileRaftSnapshotStore` は storage-engine と共通の `io/FortisFile` を使う。本文・境界・チェックサムを一時ファイルへ書き、file sync → atomic replace → directory sync の順に公開する。従来の版1も読み込める。破損は例外にし、空状態に置き換えない。公開処理が失敗したインスタンスは再利用せず、ファイルを開き直す。
+- `RaftRuntime.saveSnapshot(metadata, data)` はローカルの `lastApplied` 到達と境界termの一致を確認し、保存後に `RaftLog.compactThrough` を呼ぶ。状態の直列化は適用と整合する時点で呼び出し側が行う。Raftで安全に削除できるのはローカルで適用済みかつ保存済みのprefixであり、遅れたfollowerはInstallSnapshotで追従する。
+- Memory/Fileログはbase indexとtermを保持し、境界を含む本文を削除する。境界termが一致する場合のみsuffixを保持する。ファイル圧縮は境界ヘッダー（チェックサム付き）とsuffixを原子的に置換し、再オープン後も境界の次のindexから追記する。従来の未圧縮ログも読み込む。
+- Runtimeに `snapshotStore` を設定すると受信した状態も保存する。保存 → 状態適用 → commit/applied更新 → 圧縮の順で処理する。commit済み境界以下の受信は状態を巻き戻さない。
+- `snapshotChunkBytes` を指定すると開始（offset=0）・中間・終了（isLast=true）を別RPCで転送する。各片の任期と受信位置を確認し、終端の成功後にだけpeerのmatch/next indexを進める。途中失敗は次の複製で先頭から再送する。未指定なら従来の単一メッセージ形式を使う（既存transport実装の互換維持）。
+- 起動時は `RaftNodeBuilder.build(snapshotStore, snapshotApplier)` で復旧する。保存済み境界とログを照合し、指定した applier で状態を復元して commit/applied を境界へ戻す。状態機械の復元が必要な場合は、既定の NoOp ではなく対応する applier を渡す。保存直後・圧縮前の停止もこの処理で収束する。境界 term が一致する suffix は保持するが、再起動だけでは commit 済みと推定せず、leader の commit 確認または新任期の commit 後に再適用する。
+- 新たにleaderとなったノードはログの境界を引き継ぎ、RuntimeのsnapshotStoreから状態を供給できる。スナップショットの世代更新が送信準備と競合した場合は転送を中断して再試行する。
+- 圧縮済みログに対応するスナップショットがない／古い／同一 index で term が異なる場合や、永続化された任期がスナップショット境界の任期より古い場合は起動を拒否する。保存・適用が失敗した場合は成功応答を返さない。呼び出し側は処理を停止し、状態機械を破棄して永続データから再起動する。
 
 ## 5. データモデルと一貫性
 

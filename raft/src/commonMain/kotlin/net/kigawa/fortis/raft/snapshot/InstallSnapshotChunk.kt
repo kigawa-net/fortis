@@ -1,14 +1,6 @@
 package net.kigawa.fortis.raft.snapshot
 
-/**
- * チャンク分割転送の1片を表す。
- *
- * 大きなスナップショット [data] を固定上限で分割し、受信側で [offset]
- * の連続性と [isLast] の終端性を検証しながら再構成する。
- * 単一メッセージの [InstallSnapshotRequest] 経路は残し、本型は追加の
- * 転送経路として使う。Transport/codec への配線と base-index 前方圧縮は
- * 将来課題とする。
- */
+/** オフセットと終端フラグを持つスナップショット転送の1片。 */
 class InstallSnapshotChunk(
     val term: Long,
     val leaderId: String,

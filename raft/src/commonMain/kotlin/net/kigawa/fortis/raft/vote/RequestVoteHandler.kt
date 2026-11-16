@@ -36,7 +36,7 @@ class RequestVoteHandler(
 
         val lastIndex = log.lastIndex()
         val lastTerm =
-            log.get(lastIndex)?.term ?: 0L
+            log.termAt(lastIndex) ?: 0L
 
         val logUpToDate =
             isCandidateLogUpToDate(

@@ -5,24 +5,18 @@ import kotlinx.coroutines.sync.withLock
 import net.kigawa.fortis.io.fs.FortisFile
 import net.kigawa.fortis.io.fs.FsFileNotFoundException
 import net.kigawa.fortis.io.fs.openRead
-import net.kigawa.fortis.io.fs.openWrite
 
-/**
- * 受信・適用したスナップショット（メタデータ＋データ）のファイル永続化。
- *
- * 保存は truncate-then-write の順序で行い、書き込み後に sync してから
- * 読み戻して検証するため、クラッシュ時の半端な内容は次回読み戻しで
- * [RaftSnapshotCorruptionException] として検出される。黙って初期化しない。
- * ファイルが存在しない場合の [load] は null を返す。
- *
- * 保存形式は最小の外枠（マジック `FRSN`＋版＋長さ付き）とする。
- * チャンク分割転送と base-index 前方圧縮の対応は将来課題であり、
- * ここでは単一世代のスナップショット全体のみを扱う。
- */
+/** 共通File I/Oでスナップショットを原子的に保存し、破損を検出する。 */
 class FileRaftSnapshotStore(
     private val file: FortisFile,
 ) {
     private val mutex = Mutex()
+    private var publicationFailed = false
+    private var recovered = false
+
+    private fun checkPublication() {
+        check(!publicationFailed) { "Snapshot publication failed; reopen before continuing" }
+    }
 
     /**
      * スナップショットを保存し、sync 後に読み戻して一致を検証する。
@@ -35,21 +29,14 @@ class FileRaftSnapshotStore(
     ) {
         val encoded = encode(metadata, data)
         mutex.withLock {
-            file.openWrite(isCreate = true) { output ->
-                output.truncate(0)
-                var offset = 0
-                while (offset < encoded.size) {
-                    val written = output.writeAt(
-                        offset = offset.toLong(),
-                        data = encoded,
-                        dataOffset = offset,
-                        length = encoded.size - offset,
-                    )
-                    check(written > 0) { "Raft snapshot write made no progress" }
-                    offset += written
-                }
-                output.sync()
+            checkPublication()
+            try {
+                replaceSnapshotFile(file, encoded)
+            } catch (failure: Throwable) {
+                publicationFailed = true
+                throw failure
             }
+            recovered = true
             val reread = decode(readAllLocked() ?: throw RaftSnapshotCorruptionException("保存直後の読み戻しに失敗した"))
             check(reread.first == metadata && reread.second.contentEquals(data)) {
                 "保存直後の読み戻し検証に失敗した"
@@ -59,8 +46,14 @@ class FileRaftSnapshotStore(
 
     /** 保存済みスナップショットを読み戻す。未保存の場合は null を返す。破損時は例外を投げる。 */
     suspend fun load(): Pair<SnapshotMetadata, ByteArray>? = mutex.withLock {
+        checkPublication()
         val bytes = readAllLocked() ?: return@withLock null
-        decode(bytes)
+        val decoded = decode(bytes)
+        if (!recovered) {
+            syncSnapshotFile(file)
+            recovered = true
+        }
+        decoded
     }
 
     /** 最新スナップショットのメタデータを返す。未保存の場合は null を返す。破損時は例外を投げる。 */
@@ -100,16 +93,17 @@ class FileRaftSnapshotStore(
         metadata: SnapshotMetadata,
         data: ByteArray,
     ): ByteArray {
-        require(data.size.toLong() <= Int.MAX_VALUE - HEADER_SIZE) {
+        require(data.size.toLong() <= Int.MAX_VALUE - HEADER_SIZE - 4) {
             "スナップショットデータが大きすぎる"
         }
-        val buffer = ByteArray(HEADER_SIZE + data.size)
+        val buffer = ByteArray(HEADER_SIZE + data.size + 4)
         MAGIC.copyInto(buffer)
         buffer[4] = VERSION
         writeLong(buffer, 5, metadata.lastIncludedIndex)
         writeLong(buffer, 13, metadata.lastIncludedTerm)
         writeInt(buffer, 21, data.size)
         data.copyInto(buffer, HEADER_SIZE)
+        writeInt(buffer, buffer.size - 4, snapshotChecksum(buffer, buffer.size - 4))
         return buffer
     }
 
@@ -122,7 +116,7 @@ class FileRaftSnapshotStore(
                 throw RaftSnapshotCorruptionException("不正なスナップショットマジック")
             }
         }
-        if (bytes[4] != VERSION) {
+        if (bytes[4] != VERSION && bytes[4] != 1.toByte()) {
             throw RaftSnapshotCorruptionException("未対応のスナップショット版: ${bytes[4]}")
         }
         val lastIncludedIndex = readLong(bytes, 5)
@@ -131,17 +125,20 @@ class FileRaftSnapshotStore(
         if (dataLength < 0) {
             throw RaftSnapshotCorruptionException("不正なスナップショット長: $dataLength")
         }
-        if (bytes.size.toLong() != HEADER_SIZE.toLong() + dataLength) {
+        if (bytes.size.toLong() != HEADER_SIZE.toLong() + dataLength + (if (bytes[4] == VERSION) 4 else 0)) {
             throw RaftSnapshotCorruptionException(
                 "スナップショットのサイズ不一致: size=${bytes.size}, dataLength=$dataLength",
             )
+        }
+        if (bytes[4] == VERSION && readInt(bytes, bytes.size - 4) != snapshotChecksum(bytes, bytes.size - 4)) {
+            throw RaftSnapshotCorruptionException("スナップショットのチェックサム不一致")
         }
         val metadata = try {
             SnapshotMetadata(lastIncludedIndex, lastIncludedTerm)
         } catch (cause: IllegalArgumentException) {
             throw RaftSnapshotCorruptionException("不正なスナップショット境界: index=$lastIncludedIndex term=$lastIncludedTerm", cause)
         }
-        return metadata to bytes.copyOfRange(HEADER_SIZE, bytes.size)
+        return metadata to bytes.copyOfRange(HEADER_SIZE, HEADER_SIZE + dataLength)
     }
 
     private fun writeInt(
@@ -192,7 +189,7 @@ class FileRaftSnapshotStore(
             'S'.code.toByte(),
             'N'.code.toByte(),
         )
-        private const val VERSION: Byte = 1
+        private const val VERSION: Byte = 2
         private const val HEADER_SIZE = 25
 
         /**

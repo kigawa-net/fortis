@@ -30,9 +30,8 @@
 
 - 実装済み: 選挙 / 複製 / QUIC + mTLS / 並列 RPC / ReadIndex / NoOp / 提案完了 / crash-safe な term・vote・log（`raft/.../runtime`、`transport/netty`、`log`）。
 - #26: CI（`.github/workflows/gradle-ci.yml`）3 ジョブ緑。
-- #17（`raft/.../snapshot`）: InstallSnapshot の Runtime 配線まで完了。単一メッセージ形式のまま。
-  - 完了内容: `RaftTransport.installSnapshot`（デフォルト実装付き）、Leader 側の世代保持・送信判断・応答反映、Runtime の送受信経路。往復テスト 16 件。
-  - 残件: チャンク分割転送、スナップショット自体の永続化、base-index 前方圧縮。
+- #17（`raft/.../snapshot`）: durable snapshot、単一／チャンクInstallSnapshot、base-index前方圧縮、snapshot＋logのrestart復旧を実装。詳細はarchitectureのスナップショット節を参照。
+  - 従来の単一メッセージ形式・未圧縮ログ・版1スナップショットとの読み取り互換性を維持。
 
 ### Phase 3 — MVCC (#21): 部分
 
