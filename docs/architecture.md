@@ -72,6 +72,7 @@ Operations / Performance
 - 読みはスナップショット分離: `getAt(key, readVersion)` は `readVersion` 以下の最新エントリを返す。未来版の指定時は最新値を返す。
 - 削除は tombstone（`value=null` の履歴）として扱う。`compact(upToVersion)` は各キーの最新1件を残し、pin 留め中の版を破壊する場合は拒否する。
 - `MvccSnapshot` は読み取り時点（版）のみを表す。pin 留めは `retain` 系と `release` で明示管理する。
+- 単一 node の timestamp、write intent、版競合、GC safe point、checkpoint 回復の契約と複数 replica の後課題は [MVCC 契約](mvcc-contract.md) を参照。
 
 ## 6. Public API
 
