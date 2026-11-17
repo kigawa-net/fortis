@@ -12,7 +12,7 @@
 | --- | --- | --- | --- |
 | 1 | — | Storage 基盤 | 完了 |
 | 2 | #18 / #17 / #26 | Raft 基盤 / Snapshot 回復 / CI | ほぼ完了（#17 は InstallSnapshot の Runtime 配線まで完了） |
-| 3 | #21 | MVCC・版付き KV・snapshot read | 部分（最小実装） |
+| 3 | #21 | MVCC・版付き KV・snapshot read | 単一 node 実装完了 |
 | 4 | #22 | Range Sharding・Multi-Raft・Routing | 部分（最小実装） |
 | 5 | #23 | Meta Raft・Membership・配置・Rebalance | 部分（最小実装） |
 | 6 | #24 | KV Transaction・Cross-Shard 2PC・Recovery | 部分（最小実装） |
@@ -33,10 +33,10 @@
 - #17（`raft/.../snapshot`）: durable snapshot、単一／チャンクInstallSnapshot、base-index前方圧縮、snapshot＋logのrestart復旧を実装。詳細はarchitectureのスナップショット節を参照。
   - 従来の単一メッセージ形式・未圧縮ログ・版1スナップショットとの読み取り互換性を維持。
 
-### Phase 3 — MVCC (#21): 部分
+### Phase 3 — MVCC (#21): 単一 node 実装完了
 
-- 実装済み（`storage-engine/.../mvcc`）: 版付き KV、snapshot read、tombstone、retain / release によるピン留め、compact 時のピン留め保護。
-- 残件: HLC / commit ordering、write intent、conflict detection の完成、GC safe-point の厳密化。
+- 実装済み（`storage-engine/.../mvcc`）: 単調 timestamp、write intent の予約・確定・破棄、版ベースの read/write conflict、pin と GC safe point、stale intent GC、checkpoint 回復。既存の Raft snapshot からの確定版再構築もテスト済み。
+- 契約と制限: [MVCC 契約](mvcc-contract.md)。複数 replica の timestamp 衝突回避・Raft による version store 同期・MVCC 検証、HLC とグローバル ordering は後課題。
 
 ### Phase 4 — Range Sharding (#22): 部分
 
@@ -83,7 +83,7 @@
 ## 優先順位（現状に合わせた次の順序案）
 
 1. #17: Snapshot の durable 化・チャンク転送・base-index 前方圧縮・restart 復旧の完成（Raft 基盤の締め）
-2. #21: MVCC の intent / conflict / ordering / GC 厳密化
+2. #21 後課題: 複数 replica の timestamp / ordering / MVCC 検証
 3. #22: epoch・再ルーティング・range scan・Runtime 配線
 4. #23: Meta 複製・実データ移動・membership 変更手順
 5. #24: durable decision・回復・原子可視性・Strict Serializability 検証

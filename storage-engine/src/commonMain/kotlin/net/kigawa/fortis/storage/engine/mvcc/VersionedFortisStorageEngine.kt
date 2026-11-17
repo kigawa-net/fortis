@@ -10,7 +10,7 @@ interface VersionedFortisStorageEngine : FortisStorageEngine {
     // 指定 version で削除する。version 直前で値が見えていた場合 true。
     suspend fun deleteAt(key: ByteArray, version: Long): Boolean
 
-    // readVersion 以下の最新エントリを返す。
+    // readVersion 以下の最新エントリを返す。compaction floor 未満は IllegalArgumentException。
     // readVersion が適用済み最大版より大きい場合は最新値を返す（未来読みは最新状態を見る）。
     suspend fun getAt(key: ByteArray, readVersion: Long): ByteArray?
 

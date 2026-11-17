@@ -30,6 +30,9 @@ class VersionedEntry(
 class MemoryMvccStorageEngine : VersionedFortisStorageEngine {
     private val histories = mutableMapOf<ByteArrayKey, MutableList<VersionedEntry>>()
     private var latest = 0L
+    private var issuedTimestamp = 0L
+    private val intents = mutableMapOf<Long, MvccWriteIntent>()
+    private val staleIntents = mutableSetOf<Long>()
     // ピン留め中の version と参照数
     private val pins = mutableMapOf<Long, Int>()
     // compact 済みの上限。retain はこの版以下を拒否する。
@@ -42,12 +45,12 @@ class MemoryMvccStorageEngine : VersionedFortisStorageEngine {
 
     // 未指定版の put は次版として記録する
     override suspend fun put(key: ByteArray, value: ByteArray) {
-        mutex.withLock { addLocked(key.copyOf(), value.copyOf(), latest + 1) }
+        mutex.withLock { addLocked(key.copyOf(), value.copyOf(), nextTimestampLocked()) }
     }
 
     // 未指定版の delete は次版として記録する
     override suspend fun delete(key: ByteArray): Boolean {
-        return mutex.withLock { removeLocked(key, latest + 1) }
+        return mutex.withLock { removeLocked(key, nextTimestampLocked()) }
     }
 
     override suspend fun putAt(key: ByteArray, value: ByteArray, version: Long) {
@@ -61,6 +64,7 @@ class MemoryMvccStorageEngine : VersionedFortisStorageEngine {
     }
 
     override suspend fun getAt(key: ByteArray, readVersion: Long): ByteArray? = mutex.withLock {
+        require(readVersion >= compactedFloor) { "version $readVersion was compacted below $compactedFloor" }
         newestAt(histories[ByteArrayKey(key)], readVersion)?.copyOf()
     }
 
@@ -107,6 +111,10 @@ class MemoryMvccStorageEngine : VersionedFortisStorageEngine {
     }
 
     override suspend fun compact(upToVersion: Long) = mutex.withLock {
+        compactLocked(upToVersion)
+    }
+
+    private fun compactLocked(upToVersion: Long) {
         val floor = pins.keys.minOrNull()
         require(floor == null || upToVersion < floor) {
             "compact($upToVersion) would destroy retained snapshot at version $floor"
@@ -121,6 +129,104 @@ class MemoryMvccStorageEngine : VersionedFortisStorageEngine {
             history.sortBy { it.version }
         }
         if (upToVersion > compactedFloor) compactedFloor = upToVersion
+    }
+
+    /** 単一エンジン内で単調な timestamp を発行する。 */
+    suspend fun nextTimestamp(): Long = mutex.withLock { nextTimestampLocked() }
+
+    private fun nextTimestampLocked(): Long {
+        val previous = maxOf(issuedTimestamp, latest, compactedFloor)
+        check(previous < Long.MAX_VALUE) { "timestamp exhausted" }
+        issuedTimestamp = previous + 1
+        return issuedTimestamp
+    }
+
+    /** 値と競合検証用の版を同じ排他区間で読む。 */
+    suspend fun readVersioned(key: ByteArray): MvccRead = mutex.withLock {
+        val entry = histories[ByteArrayKey(key)]?.lastOrNull()
+        MvccRead(key, entry?.version ?: 0L, entry?.value)
+    }
+
+    /** 書き込み版を予約する。value=null は削除。reads は commit 時に版を検証する。 */
+    suspend fun beginWrite(
+        key: ByteArray,
+        value: ByteArray?,
+        reads: List<MvccRead> = emptyList(),
+    ): MvccWriteIntent = mutex.withLock {
+        val intent = MvccWriteIntent(nextTimestampLocked(), key, value, reads)
+        intents[intent.version] = intent
+        intent
+    }
+
+    /** 予約版を原子的に確定する。公開済み版より古い予約は確定できない。 */
+    suspend fun commit(intent: MvccWriteIntent): MvccCommitResult = mutex.withLock {
+        check(intents[intent.version] === intent) { "write intent is not active in this engine" }
+        intents.remove(intent.version)
+        if (intent.reads.any { read ->
+                (histories[ByteArrayKey(read.key)]?.lastOrNull()?.version ?: 0L) != read.version
+            }) {
+            staleIntents.add(intent.version)
+            return@withLock MvccCommitResult.READ_CONFLICT
+        }
+        if (intent.version <= maxOf(latest, compactedFloor)) {
+            staleIntents.add(intent.version)
+            return@withLock MvccCommitResult.SUPERSEDED
+        }
+        val value = intent.value
+        if (value == null) removeLocked(intent.key, intent.version)
+        else addLocked(intent.key, value, intent.version)
+        MvccCommitResult.COMMITTED
+    }
+
+    /** 未確定予約を stale として破棄する。 */
+    suspend fun abort(intent: MvccWriteIntent) = mutex.withLock {
+        check(intents[intent.version] === intent) { "write intent is not active in this engine" }
+        intents.remove(intent.version)
+        staleIntents.add(intent.version)
+        Unit
+    }
+
+    /** この境界より低い版を GC できる。pin がなければ発行済み最大版の次を返す。 */
+    suspend fun gcSafePoint(): Long = mutex.withLock { gcSafePointLocked() }
+
+    private fun gcSafePointLocked(): Long = pins.keys.minOrNull() ?: run {
+        val maximum = maxOf(issuedTimestamp, latest, compactedFloor)
+        if (maximum == Long.MAX_VALUE) maximum else maximum + 1
+    }
+
+    /** pin を保護して履歴と stale 予約を GC し、削除した予約数を返す。 */
+    suspend fun collectGarbage(): Int = mutex.withLock {
+        val safePoint = gcSafePointLocked()
+        compactLocked(minOf(latest, safePoint - 1))
+        val removed = staleIntents.filter { it < safePoint }
+        staleIntents.removeAll(removed.toSet())
+        removed.size
+    }
+
+    /** 復旧用に履歴・floor・発行済み版・未確定予約を原子的に取得する。 */
+    suspend fun checkpoint(): MvccCheckpoint = mutex.withLock {
+        MvccCheckpoint(
+            histories.flatMap { (key, history) ->
+                history.map { MvccHistoryRecord(key.bytes, it.version, it.value) }
+            },
+            latest, issuedTimestamp, compactedFloor, intents.keys + staleIntents,
+        )
+    }
+
+    /** 空のエンジンに復元する。旧プロセスの pin は解放し、未確定予約は stale にする。 */
+    suspend fun restoreCheckpoint(checkpoint: MvccCheckpoint): Unit = mutex.withLock {
+        check(histories.isEmpty() && issuedTimestamp == 0L && compactedFloor == 0L) {
+            "checkpoint restore target must be empty"
+        }
+        for (record in checkpoint.history) {
+            val value = record.value
+            if (value == null) removeLocked(record.key, record.version)
+            else addLocked(record.key, value, record.version)
+        }
+        latest = checkpoint.latestVersion
+        issuedTimestamp = checkpoint.issuedTimestamp
+        compactedFloor = checkpoint.compactedFloor
+        staleIntents.addAll(checkpoint.uncommittedVersions)
     }
 
     override suspend fun scanPrefixAt(
@@ -161,6 +267,7 @@ class MemoryMvccStorageEngine : VersionedFortisStorageEngine {
         // Raft 適用は昇順だが順不同呼び出しに備えて整列する
         history.sortBy { it.version }
         if (version > latest) latest = version
+        if (version > issuedTimestamp) issuedTimestamp = version
     }
 
     // 呼び出し側で mutex 保持済みであること
@@ -171,6 +278,7 @@ class MemoryMvccStorageEngine : VersionedFortisStorageEngine {
         history.add(VersionedEntry(version, null))
         history.sortBy { it.version }
         if (version > latest) latest = version
+        if (version > issuedTimestamp) issuedTimestamp = version
         return existed
     }
 
