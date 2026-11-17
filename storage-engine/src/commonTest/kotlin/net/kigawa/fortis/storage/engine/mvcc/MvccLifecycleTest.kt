@@ -16,6 +16,16 @@ class MvccLifecycleTest {
     private val otherKey = byteArrayOf(2)
 
     @Test
+    fun sequentialTimestampsAreStrictlyIncreasingWithoutPublishingVersions() = runTest {
+        val storage = MemoryMvccStorageEngine()
+        val timestamps = (1..100).map { storage.nextTimestamp() }
+        assertTrue(timestamps.zipWithNext().all { (previous, next) -> next > previous })
+        assertEquals(0L, storage.latestVersion())
+        assertTrue(storage.exportHistory().isEmpty())
+        assertEquals(timestamps.last() + 1, storage.beginWrite(key, byteArrayOf(1)).version)
+    }
+
+    @Test
     fun timestampsIncludeExplicitWritesReservationsAndAbortWithoutReuse() = runTest {
         val storage = MemoryMvccStorageEngine()
         assertEquals(1L, storage.nextTimestamp())
@@ -77,6 +87,11 @@ class MvccLifecycleTest {
         assertFailsWith<IllegalStateException> { MemoryMvccStorageEngine().commit(intent) }
         assertEquals(MvccCommitResult.COMMITTED, storage.commit(intent))
         assertContentEquals(byteArrayOf(10), storage.get(key))
+        assertEquals(intent.version, storage.latestVersion())
+        assertEquals(intent.version, storage.versionOf(key))
+        assertContentEquals(byteArrayOf(10), storage.getAt(key, intent.version))
+        assertEquals(listOf(intent.version), storage.exportHistory().map { it.version })
+        assertTrue(storage.checkpoint().uncommittedVersions.isEmpty())
         assertFailsWith<IllegalStateException> { storage.commit(intent) }
         assertFailsWith<IllegalStateException> { storage.abort(intent) }
         val deletion = storage.beginWrite(key, null)
@@ -215,8 +230,55 @@ class MvccLifecycleTest {
         assertContentEquals(byteArrayOf(1), storage.get(key))
         val aborted = storage.beginWrite(key, byteArrayOf(2))
         storage.abort(aborted)
+        assertEquals(intent.version, storage.latestVersion())
+        assertEquals(intent.version, storage.versionOf(key))
+        assertEquals(listOf(intent.version), storage.exportHistory().map { it.version })
+        assertEquals(listOf(aborted.version), storage.checkpoint().uncommittedVersions)
         assertFailsWith<IllegalStateException> { storage.commit(aborted) }
         assertEquals(1, storage.collectGarbage())
+        assertTrue(storage.checkpoint().uncommittedVersions.isEmpty())
         assertContentEquals(byteArrayOf(1), storage.get(key))
+        assertEquals(aborted.version + 1, storage.nextTimestamp())
+    }
+
+    @Test
+    fun safePointUsesOldestPinRegardlessOfAcquisitionAndReleaseOrder() = runTest {
+        val storage = MemoryMvccStorageEngine()
+        storage.putAt(key, byteArrayOf(10), 10)
+        storage.putAt(key, byteArrayOf(20), 20)
+        storage.putAt(key, byteArrayOf(30), 30)
+        val newest = storage.retain(30)
+        val oldest = storage.retain(10)
+        val middle = storage.retain(20)
+        assertEquals(10L, storage.gcSafePoint())
+        storage.release(middle)
+        assertEquals(10L, storage.gcSafePoint())
+        storage.release(oldest)
+        assertEquals(30L, storage.gcSafePoint())
+        storage.collectGarbage()
+        assertFailsWith<IllegalArgumentException> { storage.getAt(key, 10) }
+        assertFailsWith<IllegalArgumentException> { storage.getAt(key, 20) }
+        assertContentEquals(byteArrayOf(30), storage.getAt(key, newest.version))
+        storage.release(newest)
+        assertEquals(31L, storage.gcSafePoint())
+    }
+
+    @Test
+    fun crashWithOnlyPendingIntentsRestoresThemAsStaleWithoutPublishingValues() = runTest {
+        val source = MemoryMvccStorageEngine()
+        val pending = source.beginWrite(key, byteArrayOf(10))
+        assertEquals(0, source.collectGarbage())
+        val restored = MemoryMvccStorageEngine()
+        restored.restoreCheckpoint(source.checkpoint())
+        assertEquals(0L, restored.latestVersion())
+        assertNull(restored.get(key))
+        assertTrue(restored.exportHistory().isEmpty())
+        assertFailsWith<IllegalStateException> { restored.commit(pending) }
+        assertFailsWith<IllegalStateException> { restored.abort(pending) }
+        assertEquals(listOf(pending.version), restored.checkpoint().uncommittedVersions)
+        assertEquals(1, restored.collectGarbage())
+        assertEquals(0, restored.collectGarbage())
+        assertTrue(restored.checkpoint().uncommittedVersions.isEmpty())
+        assertEquals(pending.version + 1, restored.nextTimestamp())
     }
 }
