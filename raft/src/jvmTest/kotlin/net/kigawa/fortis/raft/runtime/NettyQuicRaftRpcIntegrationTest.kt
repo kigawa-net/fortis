@@ -25,6 +25,9 @@ import net.kigawa.fortis.raft.log.RaftLogEntry
 import net.kigawa.fortis.raft.log.RaftLogEntryPayload
 import net.kigawa.fortis.raft.node.RaftNodeBuilder
 import net.kigawa.fortis.raft.node.RaftTimer
+import net.kigawa.fortis.raft.sharding.KeyRange
+import net.kigawa.fortis.raft.sharding.RaftGroupManager
+import net.kigawa.fortis.raft.sharding.RangeMetadata
 import net.kigawa.fortis.raft.transport.RaftPeerAddress
 import net.kigawa.fortis.raft.transport.RaftPeerResolver
 import net.kigawa.fortis.raft.transport.RaftRpcHandler
@@ -640,6 +643,40 @@ class NettyQuicRaftRpcIntegrationTest {
             assertFailsWith<RaftTransportException> {
                 RpcRaftTransport(channel).requestVote("node-2", voteRequest("node-3"))
             }
+        } finally {
+            close(listOf(channel), listOf(server))
+        }
+    }
+
+    @Test
+    fun groupedQuicDispatchUsesBothGroupAndAuthenticatedPeer() = runNetworkTest {
+        val authority = TestRaftCertificateAuthority.create()
+        val addresses = mutableMapOf<String, RaftPeerAddress>()
+        val resolver = resolver(addresses)
+        val channel = NettyQuicRaftRpcChannel(resolver, tlsConfig(authority, "node-1"))
+        val manager = RaftGroupManager("node-2", resolver)
+        val leftTransport = RpcRaftTransport.forGroup("left", channel)
+        val rightTransport = RpcRaftTransport.forGroup("right", channel)
+        val left = node("node-2", leftTransport, peerIds = setOf("node-1"))
+        val right = node("node-2", rightTransport, peerIds = setOf("node-3"))
+        val boundary = byteArrayOf(10)
+        manager.create(RangeMetadata(KeyRange("left", null, boundary)), left.runtime)
+        manager.create(RangeMetadata(KeyRange("right", boundary, null)), right.runtime)
+        val server = NettyQuicRaftRpcServer.forGroups(
+            RaftPeerAddress("127.0.0.1", 0), manager, tlsConfig(authority, "node-2"),
+        )
+        try {
+            server.start()
+            addresses["node-2"] = server.boundAddress
+            assertTrue(leftTransport.requestVote("node-2", voteRequest("node-1")).voteGranted)
+            assertFailsWith<RaftTransportException> {
+                rightTransport.requestVote("node-2", voteRequest("node-1"))
+            }
+            assertFailsWith<RaftTransportException> {
+                rightTransport.requestVote("node-2", voteRequest("node-3"))
+            }
+            assertEquals(0L, right.runtime.currentNode.persistentState.currentTerm)
+            assertEquals(1, channel.connectionCreationCount)
         } finally {
             close(listOf(channel), listOf(server))
         }
