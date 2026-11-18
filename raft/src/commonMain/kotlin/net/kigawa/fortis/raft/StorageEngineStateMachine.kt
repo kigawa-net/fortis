@@ -26,6 +26,10 @@ class StorageEngineStateMachine(
     /** Local read; call through RaftRuntime.linearizableRead for a quorum-confirmed read. */
     suspend fun get(key: ByteArray): ByteArray? = storage.get(key)
 
+    internal suspend fun getAt(key: ByteArray, revision: Long): ByteArray? = versioned().getAt(key, revision)
+
+    internal suspend fun versionOf(key: ByteArray): Long = versioned().versionOf(key)
+
     /** 適用済みの最大 revision（Raft log index）。線形化可能読み取りの中で呼ぶこと。 */
     suspend fun latestRevision(): Long = versioned().latestVersion()
 

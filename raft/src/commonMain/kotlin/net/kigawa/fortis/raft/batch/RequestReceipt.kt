@@ -7,7 +7,7 @@ sealed interface BatchOutcome {
     /** 全条件が成立し、全変更を [raftIndex] の版で適用した。 */
     data class Applied(val raftIndex: Long) : BatchOutcome
 
-    /** [failedCondition] 番目（conditions の添字）が不成立。変更は一切適用していない。 */
+    /** [failedCondition] の条件が不成立。対応する prepare が無い内部 commit は -1 を返す。 */
     data class Rejected(val failedCondition: Int, val observedRevision: Long) : BatchOutcome
 }
 
@@ -107,13 +107,29 @@ internal object ConditionalBatchApplier {
                 ApplyResult.DigestMismatch(existing)
             }
         }
-        val outcome = failedCondition(request, storage)?.let { (index, observed) ->
+        val failure = if (request.mode == BatchMode.COMMIT_PREPARED) {
+            val prepared = ledger.find(request.principal, request.requestId + PREPARED_BATCH_SUFFIX)
+            val expected = ConditionalBatchCodec.encodeRequestBody(
+                request.conditions, request.mutations, BatchMode.PREPARE,
+            )
+            if (prepared?.outcome is BatchOutcome.Applied && prepared.requestDigest.contentEquals(expected)) {
+                null
+            } else {
+                // No condition was evaluated: this request lacks a matching successful prepare.
+                -1 to 0L
+            }
+        } else {
+            failedCondition(request, storage)
+        }
+        val outcome = failure?.let { (index, observed) ->
             BatchOutcome.Rejected(index, observed)
         } ?: run {
-            for (mutation in request.mutations) {
-                when (mutation) {
-                    is KvMutation.Put -> storage.putAt(mutation.key, mutation.value, raftIndex)
-                    is KvMutation.Delete -> storage.deleteAt(mutation.key, raftIndex)
+            if (request.mode != BatchMode.PREPARE) {
+                for (mutation in request.mutations) {
+                    when (mutation) {
+                        is KvMutation.Put -> storage.putAt(mutation.key, mutation.value, raftIndex)
+                        is KvMutation.Delete -> storage.deleteAt(mutation.key, raftIndex)
+                    }
                 }
             }
             BatchOutcome.Applied(raftIndex)

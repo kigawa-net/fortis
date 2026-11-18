@@ -15,7 +15,7 @@
 | 3 | #21 | MVCC・版付き KV・snapshot read | 単一 node 実装完了 |
 | 4 | #22 | Range Sharding・Multi-Raft・Routing | 部分（最小実装） |
 | 5 | #23 | Meta Raft・Membership・配置・Rebalance | 部分（最小実装） |
-| 6 | #24 | KV Transaction・Cross-Shard 2PC・Recovery | 部分（最小実装） |
+| 6 | #24 | KV Transaction・Cross-Shard 2PC・Recovery | 固定レンジ構成で実装済み |
 | 7 | #25 | LSM・可観測性・セキュリティ・運用 | 第一歩＋第二歩完了 |
 
 #19 は SQL 非対応の方針定義であり、実装フェーズとは分けて扱う。
@@ -48,10 +48,13 @@
 - 実装済み（`raft/.../meta`）: インメモリ Meta（`MetaStore`、`ClusterMembership`、`RangePlacement`、`RebalancePlanner` による移動計画算出のみ）。
 - 残件: 専用 Raft Group による複製、実データ移動、Learner 追加→catch-up→membership 変更の手順、Split / Merge。
 
-### Phase 6 — Transaction (#24): 部分
+### Phase 6 — Transaction (#24)
 
-- 実装済み（`raft/.../txn`）: 非本番シミュレーション（`TxnCoordinator` の begin / get / put / delete / commit / abort / recover）。
-- 残件: durable decision record、冪等な参加者回復、原子可視性、Strict Serializability 検証。現状は一部グループのみ可視の部分的適用が起こり得る。
+- `KvTransactionCoordinator` に `MultiRaftRouter`、各レンジの Leader ランタイム、記録専用の Raft Leader ランタイムを渡す。すべてのグループで版付き `StorageEngineStateMachine` と永続 Raft ログを使用する。
+- `begin()` で取得したハンドルは `read(key)`、`write(key, value)`、`commit()`、`abort()` を公開する。削除は `write(key, null)`。空でないキーは最大 1 KiB、アクセスはレンジごとに 64 キーまで、エンコードした確定計画は全体で最大 1 MiB。
+- 単一レンジは条件付きバッチ 1 要素で確定する。複数レンジは読み取りだけの参加者も prepare し、全参加者の同意を記録してから commit を適用する。記録用グループが確定処理を直列化し、各レンジの版を検証する。
+- `commit()` が `false` を返した取引は新しく開始できる。結果不明時は同じハンドルで再試行するか、Leader を解決して `recover()` と `record(id)` を呼ぶ。準備が完了した取引は復旧で commit し、適用済みバッチは再適用しない。確定処理の開始前に失われたハンドルは `abort(id)` で破棄できる。
+- Strict Serializability の運用範囲は、同じ記録用グループを共有し、固定レンジ構成で全クライアント操作をこの API に通す場合。古い読み取り版を MVCC GC が回収した場合は、取引を破棄して再試行する。開始時に全レンジの quorum が必要で、確定中の参加者が応答不能なら復旧可能になるまで新規開始を待つ。
 
 ### Phase 7 — Hardening (#25): 第一歩＋第二歩完了
 
@@ -62,7 +65,7 @@
 
 - #20 本文の Phase チェックボックスは計画時点のものであり、本書では転記していない。
 - 差分の要点: Phase 2 の Snapshot 項目は「未実装」ではなく「InstallSnapshot の Runtime 配線まで完了（単一メッセージ形式のまま）」が正。
-  Phase 3〜6 は本文上未着手に見えるが、現状はいずれも最小実装（暫定）が存在し「部分」とする。
+  Phase 3〜6 は本文上未着手に見えるが、各フェーズの現在の実装範囲は上記のとおり。
   Phase 7 は本文上未着手だが、現状はメトリクス基盤＋ backup / restore ドリル基盤まで完了している。
   #26 は本文上未完了だが現状は 3 ジョブ緑である。
 - #20 本文の「PR #8 レビュー後の優先修正」「現在地」等の時系列メモは本書に転記しない。最新状態は本書のフェーズ別状態を正とする。
@@ -86,6 +89,6 @@
 2. #21 後課題: 複数 replica の timestamp / ordering / MVCC 検証
 3. #22: epoch・再ルーティング・range scan・Runtime 配線
 4. #23: Meta 複製・実データ移動・membership 変更手順
-5. #24: durable decision・回復・原子可視性・Strict Serializability 検証
+5. #24 後課題: レンジ再構成との連携、確定処理の並列化、記録の GC
 6. #25: セキュリティ・backup・障害試験・性能測定（安全性に関わるものは先行して並走）
 7. 未決定事項の順次確定（Protocol、認証・認可、Membership 手順を先行）
