@@ -39,6 +39,7 @@ import net.kigawa.fortis.raft.snapshot.InstallSnapshotChunkResponse
 import net.kigawa.fortis.raft.snapshot.InstallSnapshotChunks
 import net.kigawa.fortis.raft.transport.RaftTransport
 import net.kigawa.fortis.raft.transport.RaftTransportException
+import net.kigawa.fortis.raft.vote.RaftVotingConfiguration
 import net.kigawa.fortis.raft.vote.RequestVoteRequest
 import net.kigawa.fortis.raft.vote.RequestVoteResponse
 import kotlin.coroutines.cancellation.CancellationException
@@ -77,7 +78,10 @@ class RaftRuntime(
     init { require(snapshotChunkBytes == null || snapshotChunkBytes > 0) }
 
     private val mutex = Mutex()
-    private val peerRpcMutexes = initialNode.peerIds.associateWith { Mutex() }
+    private val peerRpcMutexes = mutableMapOf<String, Mutex>()
+
+    private suspend fun peerRpcMutex(peerId: String): Mutex =
+        mutex.withLock { peerRpcMutexes.getOrPut(peerId) { Mutex() } }
     private var node: RaftNode = initialNode
     private var leaderHint: LeaderHint? = null
     private val appendAttempts = mutableMapOf<String, AppendAttempt>()
@@ -184,6 +188,18 @@ class RaftRuntime(
 
     /** 適用済み状態を保存してから前方ログを圧縮する。 */
     suspend fun saveSnapshot(metadata: SnapshotMetadata, data: ByteArray) = mutex.withLock {
+        saveSnapshotLocked(metadata, data)
+    }
+
+    internal suspend fun saveAppliedSnapshot(encode: suspend () -> ByteArray): SnapshotMetadata = mutex.withLock {
+        val index = node.volatileState.lastApplied
+        check(index > 0) { "No applied Raft state to snapshot" }
+        val metadata = SnapshotMetadata(index, checkNotNull(node.log.termAt(index)))
+        saveSnapshotLocked(metadata, encode())
+        metadata
+    }
+
+    private suspend fun saveSnapshotLocked(metadata: SnapshotMetadata, data: ByteArray): Unit? {
         check(node.volatileState.lastApplied >= metadata.lastIncludedIndex) { "Snapshot is not applied" }
         require(node.log.termAt(metadata.lastIncludedIndex) == metadata.lastIncludedTerm) { "Snapshot term mismatch" }
         require(metadata.lastIncludedIndex >= (node.log.snapshotMetadata()?.lastIncludedIndex ?: 0L)) {
@@ -192,11 +208,12 @@ class RaftRuntime(
         val store = checkNotNull(snapshotStore) { "Snapshot store is required for compaction" }
         store.save(metadata, data)
         node.log.compactThrough(metadata, node.volatileState.lastApplied)
-        (node as? LeaderNode)?.updateSnapshotMetadata(metadata)
+        return (node as? LeaderNode)?.updateSnapshotMetadata(metadata)
     }
 
     suspend fun onElectionTimeout() {
         val election = mutex.withLock {
+            if (!node.canVote()) return
             val previous = node
             val result = when (val current = node) {
                 is FollowerNode -> current.onElectionTimeout()
@@ -212,7 +229,7 @@ class RaftRuntime(
             )
             logLeadershipTransition(previous, node)
             val candidate = node as? CandidateNode ?: return
-            ElectionRound(candidate, result.value, node.peerIds.toList())
+            ElectionRound(candidate, result.value, candidate.votingPeers().toList())
         }
 
         coroutineScope {
@@ -223,7 +240,7 @@ class RaftRuntime(
     }
 
     private suspend fun requestVote(election: ElectionRound, peerId: String) {
-        peerRpcMutexes.getValue(peerId).withLock peerLock@{
+        peerRpcMutex(peerId).withLock peerLock@{
             if (!mutex.withLock { isCurrentElection(election) }) return@peerLock
             val response = try {
                 transport.requestVote(peerId, election.request)
@@ -401,6 +418,20 @@ class RaftRuntime(
         }
     }
 
+    internal suspend fun catchUpPeer(peerId: String): Boolean {
+        val round = mutex.withLock {
+            val leader = node as? LeaderNode ?: throw RaftProposalNotLeaderException()
+            leaderRound(leader).also { require(peerId in it.peerIds) { "Unknown peer: $peerId" } }
+        }
+        return peerRpcMutex(peerId).withLock {
+            replicatePeer(round, peerId)
+            mutex.withLock {
+                isCurrentLeader(round) &&
+                    round.leader.peerProgress.getValue(peerId).matchIndex >= round.leader.log.lastIndex()
+            }
+        }
+    }
+
     suspend fun replicate() {
         val round = mutex.withLock {
             val leader = node as? LeaderNode ?: return
@@ -412,7 +443,7 @@ class RaftRuntime(
     private suspend fun replicateRound(round: LeaderRound) = coroutineScope {
         for (peerId in round.peerIds) {
             launch {
-                peerRpcMutexes.getValue(peerId).withLock {
+                peerRpcMutex(peerId).withLock {
                     replicatePeer(round, peerId)
                 }
             }
@@ -541,8 +572,8 @@ class RaftRuntime(
         }
     }
 
-    private fun rememberLeader(term: Long, peerId: String) {
-        if (node is FollowerNode && term == node.persistentState.currentTerm && peerId in node.peerIds) {
+    private suspend fun rememberLeader(term: Long, peerId: String) {
+        if (node is FollowerNode && term == node.persistentState.currentTerm && peerId in node.votingPeers()) {
             leaderHint = LeaderHint(term, peerId)
         }
     }
@@ -552,10 +583,10 @@ class RaftRuntime(
     private fun isCurrentElection(round: ElectionRound): Boolean =
         node === round.candidate && node.persistentState.currentTerm == round.request.term
 
-    private fun leaderRound(leader: LeaderNode) = LeaderRound(
+    private suspend fun leaderRound(leader: LeaderNode) = LeaderRound(
         leader,
         leader.persistentState.currentTerm,
-        leader.peerIds.toList(),
+        leader.refreshReplicationPeers().toList(),
     )
 
     private fun isCurrentLeader(round: LeaderRound): Boolean =
@@ -611,7 +642,7 @@ class RaftRuntime(
         }
     }
 
-    private fun settlePending() {
+    private suspend fun settlePending() {
         settleProposals()
         settleReads()
     }
@@ -641,7 +672,7 @@ class RaftRuntime(
         }
     }
 
-    private fun settleReads() {
+    private suspend fun settleReads() {
         val iterator = reads.iterator()
         while (iterator.hasNext()) {
             val read = iterator.next()
@@ -655,12 +686,18 @@ class RaftRuntime(
                     read.completion.completeExceptionally(RaftReadLeadershipLostException(read.round.term))
                     iterator.remove()
                 }
+                read.configuration?.let { it != read.round.leader.votingConfiguration() } == true -> {
+                    read.completion.completeExceptionally(RaftReadLeadershipLostException(read.round.term))
+                    iterator.remove()
+                }
                 else -> {
                     if (read.index == null && read.round.leader.isReady) {
                         // Snapshot before sending probes; older RPCs cannot satisfy this context.
                         read.index = node.volatileState.commitIndex
+                        val configuration = read.round.leader.votingConfiguration()
+                        read.configuration = configuration
                         val scope = CoroutineScope(proposalScope.coroutineContext + read.probeJob)
-                        for (peerId in read.round.peerIds) {
+                        for (peerId in configuration.voters - node.nodeId) {
                             scope.launch {
                                 try {
                                     confirmRead(read, peerId)
@@ -672,7 +709,7 @@ class RaftRuntime(
                     }
                     val index = read.index
                     if (index != null &&
-                        read.confirmedPeers.size >= (read.round.peerIds.size + 1) / 2 + 1 &&
+                        checkNotNull(read.configuration).hasQuorum(read.confirmedPeers) &&
                         node.volatileState.lastApplied >= index
                     ) {
                         read.completion.complete(RaftReadIndex(index, read.round.term))
@@ -684,7 +721,7 @@ class RaftRuntime(
     }
 
     private suspend fun confirmRead(read: ReadIndexRequestContext, peerId: String) {
-        peerRpcMutexes.getValue(peerId).withLock peerLock@{
+        peerRpcMutex(peerId).withLock peerLock@{
             val request = mutex.withLock {
                 if (!read.completion.isActive || !isCurrentLeader(read.round)) return@peerLock
                 // A term-only heartbeat: never changes peer progress, logs, or commitIndex.
@@ -713,6 +750,7 @@ class RaftRuntime(
         val probeJob: Job,
     ) {
         var index: Long? = null
+        var configuration: RaftVotingConfiguration? = null
         val confirmedPeers = mutableSetOf(round.leader.nodeId)
     }
 

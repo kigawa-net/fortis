@@ -85,13 +85,29 @@ class LeaderNode(
 
     internal suspend fun initializeLeadership() = mutex.withLock {
         check(leadershipNoOp == null) { "Leadership is already initialized" }
-        leadershipNoOp = commandAppender.append(RaftLogEntryPayload.NoOp, peerProgress.values)
+        leadershipNoOp = commandAppender.append(RaftLogEntryPayload.NoOp) { quorumProgress(peerProgress) }
     }
 
     suspend fun appendCommand(command: RaftCommand): RaftLogEntry =
         mutex.withLock {
-            commandAppender.append(command, peerProgress.values)
+            metaStateMachine?.validate(command, log, volatileState.lastApplied, peerProgress)
+            commandAppender.append(RaftLogEntryPayload.Command(command)) { quorumProgress(peerProgress) }
         }
+
+    internal suspend fun refreshReplicationPeers(): Set<String> = mutex.withLock {
+        refreshReplicationPeersLocked()
+    }
+
+    private suspend fun refreshReplicationPeersLocked(): Set<String> {
+        if (metaStateMachine == null) return peerIds
+        val peers = replicationPeers()
+        val newPeers = peers - peerProgress.keys
+        if (newPeers.isNotEmpty()) {
+            val nextIndex = log.lastIndex() + 1
+            peerProgress = peerProgress + newPeers.associateWith { RaftPeerProgress(nextIndex = nextIndex) }
+        }
+        return peers
+    }
 
     suspend fun createAppendEntries(peerId: String): AppendEntriesRequest =
         mutex.withLock {
@@ -180,7 +196,7 @@ class LeaderNode(
             nextIndex = maxOf(progress.nextIndex, nextIndex),
             matchIndex = maxOf(progress.matchIndex, request.metadata.lastIncludedIndex),
         ))
-        commitAdvancer.advance(peerProgress.values)
+        commitAdvancer.advanceQuorums(quorumProgress(peerProgress))
         raftApplier.applyCommitted()
         this
     }
@@ -196,6 +212,7 @@ class LeaderNode(
             request,
             response,
             peerProgress,
+            ::quorumProgress,
         )
         if (response.term > previousTerm) {
             timer.reset(RaftTimeoutEvent.Election)
@@ -207,7 +224,7 @@ class LeaderNode(
 
     suspend fun onHeartbeatTimeout(): Map<String, AppendEntriesRequest> =
         mutex.withLock {
-            val requests = peerIds.associateWith { peerId ->
+            val requests = refreshReplicationPeersLocked().associateWith { peerId ->
                 appendEntriesFactory.create(peerId, peerProgress)
             }
             timer.reset(RaftTimeoutEvent.Heartbeat)
