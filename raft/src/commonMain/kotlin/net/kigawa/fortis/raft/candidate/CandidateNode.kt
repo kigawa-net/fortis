@@ -62,7 +62,7 @@ class CandidateNode(
         peerId: String,
         response: RequestVoteResponse,
     ): RaftNode {
-        require(peerId in peerIds) { "Unknown peer: $peerId" }
+        require(peerId in votingPeers()) { "Unknown peer: $peerId" }
 
         if (response.term > persistentState.currentTerm) {
             persistentStateStore.save(response.term, null)
@@ -88,8 +88,8 @@ class CandidateNode(
         }
     }
 
-    internal fun hasMajority(): Boolean =
-        votesGranted.size >= (peerIds.size + 1) / 2 + 1
+    internal suspend fun hasMajority(): Boolean =
+        votingConfiguration().hasQuorum(votesGranted)
 
     internal suspend fun becomeLeader(): LeaderNode {
         val nextIndex = log.lastIndex() + 1
@@ -102,7 +102,7 @@ class CandidateNode(
             log,
             stateMachine,
             timer,
-            peerIds.associateWith { RaftPeerProgress(nextIndex = nextIndex) },
+            replicationPeers().associateWith { RaftPeerProgress(nextIndex = nextIndex) },
         ).also {
             it.updateSnapshotMetadata(log.snapshotMetadata())
             it.initializeLeadership()

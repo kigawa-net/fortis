@@ -3,6 +3,7 @@ package net.kigawa.fortis.raft.node
 import net.kigawa.fortis.raft.RaftApplier
 import net.kigawa.fortis.raft.RaftCommand
 import net.kigawa.fortis.raft.RaftCommitAdvancer
+import net.kigawa.fortis.raft.RaftCommitQuorum
 import net.kigawa.fortis.raft.RaftPeerProgress
 import net.kigawa.fortis.raft.RaftPersistentState
 import net.kigawa.fortis.raft.log.RaftLog
@@ -23,6 +24,11 @@ class CommandAppender(
     suspend fun append(
         payload: RaftLogEntryPayload,
         peers: Collection<RaftPeerProgress>,
+    ): RaftLogEntry = append(payload) { listOf(RaftCommitQuorum(peers)) }
+
+    internal suspend fun append(
+        payload: RaftLogEntryPayload,
+        quorumProgress: suspend () -> List<RaftCommitQuorum>,
     ): RaftLogEntry {
         val entry = RaftLogEntry(
             index = log.lastIndex() + 1,
@@ -31,7 +37,7 @@ class CommandAppender(
         )
         log.append(entry)
 
-        commitAdvancer.advance(peers)
+        commitAdvancer.advanceQuorums(quorumProgress())
         applier.applyCommitted()
         return entry
     }

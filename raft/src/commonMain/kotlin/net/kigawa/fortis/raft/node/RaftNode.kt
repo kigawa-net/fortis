@@ -4,6 +4,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import net.kigawa.fortis.raft.RaftApplier
 import net.kigawa.fortis.raft.RaftCommitAdvancer
+import net.kigawa.fortis.raft.RaftCommitQuorum
+import net.kigawa.fortis.raft.RaftPeerProgress
 import net.kigawa.fortis.raft.RaftPersistentState
 import net.kigawa.fortis.raft.RaftPersistentStateStore
 import net.kigawa.fortis.raft.RaftStateMachine
@@ -12,7 +14,9 @@ import net.kigawa.fortis.raft.append.AppendEntriesRequest
 import net.kigawa.fortis.raft.append.AppendEntriesResponse
 import net.kigawa.fortis.raft.follower.FollowerNode
 import net.kigawa.fortis.raft.log.RaftLog
+import net.kigawa.fortis.raft.meta.MetaRaftStateMachine
 import net.kigawa.fortis.raft.vote.RaftVolatileState
+import net.kigawa.fortis.raft.vote.RaftVotingConfiguration
 import net.kigawa.fortis.raft.vote.RequestVoteHandler
 import net.kigawa.fortis.raft.vote.RequestVoteRequest
 import net.kigawa.fortis.raft.vote.RequestVoteResponse
@@ -27,6 +31,30 @@ abstract class RaftNode(
     val stateMachine: RaftStateMachine,
     val timer: RaftTimer,
 ) {
+    internal val metaStateMachine = stateMachine as? MetaRaftStateMachine
+
+    internal suspend fun votingConfiguration(): RaftVotingConfiguration =
+        metaStateMachine?.votingConfiguration(log, volatileState.lastApplied) ?: RaftVotingConfiguration(peerIds + nodeId)
+
+    internal suspend fun votingPeers(): Set<String> = votingConfiguration().voters - nodeId
+
+    internal suspend fun canVote(): Boolean = metaStateMachine == null || nodeId in votingConfiguration().voters
+
+    internal suspend fun replicationPeers(): Set<String> =
+        metaStateMachine?.let { (it.members() + votingPeers()) - nodeId } ?: peerIds
+
+    internal suspend fun quorumProgress(peers: Map<String, RaftPeerProgress>): List<RaftCommitQuorum> =
+        if (metaStateMachine == null) {
+            listOf(RaftCommitQuorum(peers.values))
+        } else {
+            votingConfiguration().quorums.map { quorum ->
+                RaftCommitQuorum(
+                    (quorum - nodeId).map { peers[it] ?: RaftPeerProgress(nextIndex = 1) },
+                    includesLeader = nodeId in quorum,
+                )
+            }
+        }
+
     private val mutex = Mutex()
     private val applier = RaftApplier(volatileState, log, stateMachine)
     private val requestVoteHandler = RequestVoteHandler(
@@ -54,7 +82,16 @@ abstract class RaftNode(
         request: RequestVoteRequest,
     ): RaftNodeResult<RequestVoteResponse> = mutex.withLock {
         val previousTerm = persistentState.currentTerm
-        val response = requestVoteHandler.handle(request)
+        val response = if (canVote()) {
+            requestVoteHandler.handle(request)
+        } else {
+            if (request.term > previousTerm) {
+                persistentStateStore.save(request.term, null)
+                persistentState.currentTerm = request.term
+                persistentState.votedFor = null
+            }
+            RequestVoteResponse(persistentState.currentTerm, false)
+        }
         if (response.voteGranted) {
             timer.reset(RaftTimeoutEvent.Election)
         }

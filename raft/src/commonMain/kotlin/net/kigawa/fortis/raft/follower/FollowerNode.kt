@@ -33,6 +33,7 @@ class FollowerNode(
     timer,
 ) {
     suspend fun onElectionTimeout(): RaftNodeResult<RequestVoteRequest> {
+        check(canVote()) { "Only a voter can start an election" }
         check(persistentState.currentTerm < Long.MAX_VALUE) {
             "Raft term is exhausted"
         }

@@ -88,6 +88,46 @@ object RebalancePlanner {
         rangeId: String,
     ): String = evenDistribution(rangeTable, membership).ownerOf(rangeId)
 
+    /**
+     * 現在のノード負荷から、偏りを減らす移動をレンジごとに最大 1 件算出する。
+     * 負荷は同一単位で、各ノードの値は配置済みレプリカの負荷を含む。
+     */
+    fun planReplicaMigrations(
+        nodeLoads: Map<String, Long>,
+        ranges: Collection<RangeReplicaLoad>,
+        eligibleTargets: Set<String> = nodeLoads.keys,
+    ): List<ReplicaMigration> {
+        require(nodeLoads.values.all { it >= 0 } && nodeLoads.keys.containsAll(eligibleTargets))
+        require(ranges.map { it.rangeId }.toSet().size == ranges.size) { "Duplicate range load" }
+        val unaccounted = nodeLoads.toMutableMap()
+        for (range in ranges) {
+            for (nodeId in range.replicas) {
+                val available = unaccounted[nodeId] ?: -1L
+                require(available >= range.loadPerReplica) { "Missing or insufficient load on node $nodeId" }
+                unaccounted[nodeId] = available - range.loadPerReplica
+            }
+        }
+        val projected = nodeLoads.toMutableMap()
+        val sortedRanges = ranges.sortedWith(compareByDescending<RangeReplicaLoad> { it.loadPerReplica }
+            .thenBy { it.rangeId.value })
+        return buildList {
+            for (range in sortedRanges) {
+                val from = range.replicas.minWith(
+                    compareByDescending<String> { projected.getValue(it) }.thenBy { it },
+                )
+                val to = (eligibleTargets - range.replicas).minWithOrNull(
+                    compareBy<String> { projected.getValue(it) }.thenBy { it },
+                ) ?: continue
+                val sourceLoad = projected.getValue(from)
+                val targetLoad = projected.getValue(to)
+                if (sourceLoad - targetLoad <= range.loadPerReplica) continue
+                projected[from] = sourceLoad - range.loadPerReplica
+                projected[to] = targetLoad + range.loadPerReplica
+                add(ReplicaMigration(range.rangeId, from, to))
+            }
+        }
+    }
+
     private fun slotOwner(index: Int, rangeCount: Int, memberCount: Int): Int {
         val base = rangeCount / memberCount
         val remainder = rangeCount % memberCount
