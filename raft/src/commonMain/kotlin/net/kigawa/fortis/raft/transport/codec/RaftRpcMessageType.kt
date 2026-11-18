@@ -1,6 +1,7 @@
 package net.kigawa.fortis.raft.transport.codec
 
 object RaftRpcMessageType {
+    const val GROUP: Byte = 9
     const val INSTALL_SNAPSHOT_CHUNK: Byte = 7
     const val INSTALL_SNAPSHOT_CHUNK_RESPONSE: Byte = 8
 

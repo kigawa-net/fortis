@@ -24,22 +24,40 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import net.kigawa.fortis.raft.sharding.RaftGroupManager
 import net.kigawa.fortis.raft.transport.RaftPeerAddress
 import net.kigawa.fortis.raft.transport.RaftRpcHandler
 import net.kigawa.fortis.raft.transport.RaftRpcServer
 import net.kigawa.fortis.raft.transport.RaftTransportException
 import net.kigawa.fortis.raft.transport.codec.RaftRpcCodec
 import net.kigawa.fortis.raft.transport.codec.RaftRpcDecodeResult
-import net.kigawa.fortis.raft.transport.codec.RaftRpcMessage
+import net.kigawa.fortis.raft.transport.codec.senderId
 
-class NettyQuicRaftRpcServer(
+class NettyQuicRaftRpcServer private constructor(
     private val address: RaftPeerAddress,
-    private val handler: RaftRpcHandler,
     tlsConfig: NettyRaftTlsConfig,
-    private val codec: RaftRpcCodec = RaftRpcCodec(),
-    dispatcher: CoroutineDispatcher = Dispatchers.Default,
-    private val idleTimeoutMillis: Long = DEFAULT_IDLE_TIMEOUT_MILLIS,
+    private val codec: RaftRpcCodec,
+    dispatcher: CoroutineDispatcher,
+    private val idleTimeoutMillis: Long,
+    private val handleFrame: suspend (String, ByteArray) -> ByteArray,
 ) : RaftRpcServer {
+    constructor(
+        address: RaftPeerAddress,
+        handler: RaftRpcHandler,
+        tlsConfig: NettyRaftTlsConfig,
+        codec: RaftRpcCodec = RaftRpcCodec(),
+        dispatcher: CoroutineDispatcher = Dispatchers.Default,
+        idleTimeoutMillis: Long = DEFAULT_IDLE_TIMEOUT_MILLIS,
+    ) : this(address, tlsConfig, codec, dispatcher, idleTimeoutMillis, { peerId, frame ->
+        val decoded = codec.decode(frame) as? RaftRpcDecodeResult.Success
+            ?: throw RaftTransportException("Expected a single-group Raft RPC")
+        if (!handler.isKnownPeer(peerId)) {
+            throw RaftTransportException("Authenticated Raft peer is not a cluster member: $peerId")
+        }
+        requireSender(peerId, decoded.message.senderId())
+        codec.encode(handler.handle(decoded.message))
+    })
+
     private val sslContext = NettyQuicSslContextFactory.server(tlsConfig)
     private val eventLoopGroup: EventLoopGroup =
         MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory())
@@ -107,22 +125,10 @@ class NettyQuicRaftRpcServer(
 
     private inner class RequestHandler : NettyRaftRpcFrameHandler(codec) {
         override fun onFrame(context: ChannelHandlerContext, frame: ByteArray) {
-            val message = (codec.decode(frame) as RaftRpcDecodeResult.Success).message
             val authenticatedPeerId = authenticatedPeerId(context)
-            if (!handler.isKnownPeer(authenticatedPeerId)) {
-                throw RaftTransportException(
-                    "Authenticated Raft peer is not a cluster member: $authenticatedPeerId",
-                )
-            }
-            val claimedPeerId = claimedPeerId(message)
-            if (authenticatedPeerId != claimedPeerId) {
-                throw RaftTransportException(
-                    "Authenticated Raft peer $authenticatedPeerId cannot send RPC as $claimedPeerId",
-                )
-            }
             scope.launch {
                 try {
-                    val response = codec.encode(handler.handle(message))
+                    val response = handleFrame(authenticatedPeerId, frame)
                     context.writeAndFlush(Unpooled.wrappedBuffer(response))
                         .addListener(QuicStreamChannel.SHUTDOWN_OUTPUT)
                 } catch (cause: Throwable) {
@@ -147,22 +153,31 @@ class NettyQuicRaftRpcServer(
         return NettyRaftCertificateIdentity.peerId(certificate)
     }
 
-    private fun claimedPeerId(message: RaftRpcMessage): String = when (message) {
-        is RaftRpcMessage.RequestVote -> message.request.candidateId
-        is RaftRpcMessage.AppendEntries -> message.request.leaderId
-        is RaftRpcMessage.SnapshotChunk -> message.chunk.leaderId
-        is RaftRpcMessage.InstallSnapshot -> message.request.leaderId
-        is RaftRpcMessage.SnapshotChunkResult,
-        is RaftRpcMessage.RequestVoteResult,
-        is RaftRpcMessage.AppendEntriesResult,
-        is RaftRpcMessage.InstallSnapshotResult,
-        -> throw RaftTransportException("Raft RPC server received a response message")
-    }
-
     private fun maximumFrameSize(): Long =
         codec.headerSize.toLong() + codec.maxPayloadLength.toLong()
 
     companion object {
+        /** 共有 QUIC サーバーでグループ付き RPC を受信する。 */
+        fun forGroups(
+            address: RaftPeerAddress,
+            manager: RaftGroupManager,
+            tlsConfig: NettyRaftTlsConfig,
+            codec: RaftRpcCodec = RaftRpcCodec(),
+            dispatcher: CoroutineDispatcher = Dispatchers.Default,
+            idleTimeoutMillis: Long = DEFAULT_IDLE_TIMEOUT_MILLIS,
+        ): NettyQuicRaftRpcServer =
+            NettyQuicRaftRpcServer(address, tlsConfig, codec, dispatcher, idleTimeoutMillis) { peerId, frame ->
+                val request = codec.decodeGroup(frame)
+                requireSender(peerId, request.message.senderId())
+                codec.encodeGroup(manager.handleRpc(request))
+            }
+
+        private fun requireSender(authenticated: String, claimed: String) {
+            if (authenticated != claimed) {
+                throw RaftTransportException("Authenticated Raft peer $authenticated cannot send RPC as $claimed")
+            }
+        }
+
         private const val DEFAULT_IDLE_TIMEOUT_MILLIS = 5_000L
         private const val MAX_CONNECTION_DATA = 64L * 1024L * 1024L
         private const val MAX_CONCURRENT_STREAMS = 100L

@@ -11,7 +11,9 @@ import net.kigawa.fortis.raft.snapshot.InstallSnapshotChunkResponse
 import net.kigawa.fortis.raft.snapshot.InstallSnapshotRequest
 import net.kigawa.fortis.raft.snapshot.InstallSnapshotResponse
 import net.kigawa.fortis.raft.snapshot.SnapshotMetadata
+import net.kigawa.fortis.raft.transport.RaftTransportException
 import net.kigawa.fortis.raft.vote.RequestVoteRequest
+import kotlin.text.CharacterCodingException
 import net.kigawa.fortis.raft.vote.RequestVoteResponse
 
 class RaftRpcCodec(
@@ -84,6 +86,54 @@ class RaftRpcCodec(
             "Raft RPC payload is too large: ${payload.size}"
         }
 
+        return frame(type, payload)
+    }
+
+    /** グループ付きフレームを符号化する。既存 RPC の型とペイロードを内包する。 */
+    fun encodeGroup(message: GroupRaftRpcMessage): ByteArray {
+        val id = message.groupId.encodeToByteArray(throwOnInvalidSequence = true)
+        val inner = encode(message.message)
+        val payloadSize = 5L + id.size + inner.size - headerSize
+        require(payloadSize <= maxPayloadLength) { "Raft group RPC payload is too large: $payloadSize" }
+        val payload = ByteArray(payloadSize.toInt())
+        writeInt(payload, 0, id.size)
+        id.copyInto(payload, 4)
+        payload[4 + id.size] = inner[5]
+        inner.copyInto(payload, 5 + id.size, startIndex = headerSize)
+        return frame(RaftRpcMessageType.GROUP, payload)
+    }
+
+    /** グループ付きフレームを一件復号する。不正なフレームは拒否する。 */
+    fun decodeGroup(frame: ByteArray): GroupRaftRpcMessage {
+        if (frame.size < headerSize + 5 || !isGroupFrame(frame) || frame[4] != version) {
+            throw RaftTransportException("Invalid Raft group RPC header")
+        }
+        val payloadSize = readInt(frame, 6)
+        if (payloadSize != frame.size - headerSize || payloadSize > maxPayloadLength) {
+            throw RaftTransportException("Invalid Raft group RPC payload length")
+        }
+        val idSize = readInt(frame, headerSize)
+        if (idSize !in 1..(payloadSize - 5)) {
+            throw RaftTransportException("Invalid Raft group ID length")
+        }
+        val idStart = headerSize + 4
+        val typeOffset = idStart + idSize
+        val id = try {
+            frame.decodeToString(idStart, typeOffset, throwOnInvalidSequence = true)
+        } catch (cause: CharacterCodingException) {
+            throw RaftTransportException("Invalid Raft group ID encoding", cause)
+        }
+        return when (val result = decodePayload(frame[typeOffset], frame, typeOffset + 1, frame.size)) {
+            is PayloadResult.Success -> GroupRaftRpcMessage(id, result.message)
+            is PayloadResult.Corrupted -> throw RaftTransportException(result.reason)
+        }
+    }
+
+    internal fun isGroupFrame(frame: ByteArray): Boolean =
+        frame.size >= headerSize && frame[5] == RaftRpcMessageType.GROUP &&
+            MAGIC.indices.all { frame[it] == MAGIC[it] }
+
+    private fun frame(type: Byte, payload: ByteArray): ByteArray {
         val frame = ByteArray(headerSize + payload.size)
         MAGIC.copyInto(frame)
         frame[4] = version

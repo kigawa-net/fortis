@@ -60,19 +60,21 @@ internal abstract class NettyRaftRpcFrameHandler(
     private fun finish(context: ChannelHandlerContext) {
         if (failed || delivered) return
         val frame = buffer.toByteArray()
+        if (codec.isGroupFrame(frame)) {
+            try {
+                codec.decodeGroup(frame)
+                deliver(context, frame)
+            } catch (cause: RaftTransportException) {
+                fail(context, cause.message ?: "Corrupted Raft group RPC frame")
+            }
+            return
+        }
         when (val result = codec.decode(frame)) {
             is RaftRpcDecodeResult.Success -> {
                 if (result.bytesRead != frame.size) {
                     fail(context, "Unexpected trailing bytes in Raft RPC frame")
                 } else {
-                    delivered = true
-                    try {
-                        onFrame(context, frame)
-                    } catch (cause: Throwable) {
-                        failed = true
-                        onFailure(cause)
-                        context.close()
-                    }
+                    deliver(context, frame)
                 }
             }
 
@@ -81,6 +83,17 @@ internal abstract class NettyRaftRpcFrameHandler(
                 context,
                 "Corrupted Raft RPC frame: ${result.reason}",
             )
+        }
+    }
+
+    private fun deliver(context: ChannelHandlerContext, frame: ByteArray) {
+        delivered = true
+        try {
+            onFrame(context, frame)
+        } catch (cause: Throwable) {
+            failed = true
+            onFailure(cause)
+            context.close()
         }
     }
 

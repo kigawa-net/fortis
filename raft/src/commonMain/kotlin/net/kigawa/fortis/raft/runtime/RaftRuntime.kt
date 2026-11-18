@@ -79,6 +79,7 @@ class RaftRuntime(
     private val mutex = Mutex()
     private val peerRpcMutexes = initialNode.peerIds.associateWith { Mutex() }
     private var node: RaftNode = initialNode
+    private var leaderHint: LeaderHint? = null
     private val appendAttempts = mutableMapOf<String, AppendAttempt>()
     private val snapshotAttempts = mutableMapOf<String, SnapshotAttempt>()
     private val snapshotHandler = InstallSnapshotHandler(
@@ -98,6 +99,16 @@ class RaftRuntime(
 
     val currentNode: RaftNode
         get() = node
+
+    /** 現在の任期で確認したリーダーの ID を返す。 */
+    suspend fun knownLeaderId(): String? = mutex.withLock {
+        if (!proposalJob.isActive) return@withLock null
+        when (val current = node) {
+            is LeaderNode -> current.nodeId
+            is FollowerNode -> leaderHint?.takeIf { it.term == current.persistentState.currentTerm }?.peerId
+            else -> null
+        }
+    }
 
     suspend fun start() {
         node.timer.reset(RaftTimeoutEvent.Election)
@@ -131,6 +142,7 @@ class RaftRuntime(
         val previous = node
         val result = node.handleAppendEntries(request)
         node = result.node
+        rememberLeader(request.term, request.leaderId)
         logLeadershipTransition(previous, node)
         settlePending()
         result.value
@@ -154,6 +166,7 @@ class RaftRuntime(
         if (request.term >= previousTerm && node !is FollowerNode) {
             node = node.follower()
         }
+        rememberLeader(request.term, request.leaderId)
         logLeadershipTransition(previous, node)
         settlePending()
         response
@@ -164,6 +177,7 @@ class RaftRuntime(
         val previousTerm = node.persistentState.currentTerm
         val response = snapshotHandler.handleChunk(chunk)
         if (chunk.term >= previousTerm && node !is FollowerNode) node = node.follower()
+        rememberLeader(chunk.term, chunk.leaderId)
         settlePending()
         response
     }
@@ -526,6 +540,14 @@ class RaftRuntime(
             !response.success && isCurrentLeader(round)
         }
     }
+
+    private fun rememberLeader(term: Long, peerId: String) {
+        if (node is FollowerNode && term == node.persistentState.currentTerm && peerId in node.peerIds) {
+            leaderHint = LeaderHint(term, peerId)
+        }
+    }
+
+    private data class LeaderHint(val term: Long, val peerId: String)
 
     private fun isCurrentElection(round: ElectionRound): Boolean =
         node === round.candidate && node.persistentState.currentTerm == round.request.term
