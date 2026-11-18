@@ -10,6 +10,7 @@ import net.kigawa.fortis.storage.engine.mvcc.MvccHistoryRecord
  */
 object ConditionalBatchCodec {
     private const val VERSION: Byte = 1
+    private const val TRANSACTION_VERSION: Byte = 2
     private const val CONDITION_ABSENT: Byte = 1
     private const val CONDITION_REVISION_EQUALS: Byte = 2
     private const val MUTATION_PUT: Byte = 3
@@ -19,9 +20,15 @@ object ConditionalBatchCodec {
     internal fun encodeRequestBody(
         conditions: List<KvCondition>,
         mutations: List<KvMutation>,
+        mode: BatchMode,
     ): ByteArray {
         val writer = BinaryWriter()
-        writer.byte(VERSION)
+        if (mode == BatchMode.APPLY) {
+            writer.byte(VERSION)
+        } else {
+            writer.byte(TRANSACTION_VERSION)
+            writer.byte(mode.tag)
+        }
         writer.int(conditions.size)
         for (condition in conditions) {
             when (condition) {
@@ -70,15 +77,23 @@ object ConditionalBatchCodec {
         val requestId = reader.string()
         val body = reader.bytes()
         reader.requireEnd()
-        val (conditions, mutations) = decodeRequestBody(body)
-        val request = ConditionalBatchRequest(principal, requestId, conditions, mutations)
+        val bodyReader = BinaryReader(body)
+        val mode = when (bodyReader.byte()) {
+            VERSION -> BatchMode.APPLY
+            TRANSACTION_VERSION -> when (bodyReader.byte()) {
+                BatchMode.PREPARE.tag -> BatchMode.PREPARE
+                BatchMode.COMMIT_PREPARED.tag -> BatchMode.COMMIT_PREPARED
+                else -> throw IllegalArgumentException("Unknown transaction batch mode")
+            }
+            else -> throw IllegalArgumentException("Unsupported conditional batch version")
+        }
+        val (conditions, mutations) = decodeRequestBody(bodyReader)
+        val request = ConditionalBatchRequest(principal, requestId, conditions, mutations, mode)
         require(request.requestDigest.contentEquals(body)) { "Conditional batch body is not canonical" }
         return request
     }
 
-    private fun decodeRequestBody(body: ByteArray): Pair<List<KvCondition>, List<KvMutation>> {
-        val reader = BinaryReader(body)
-        require(reader.byte() == VERSION) { "Unsupported conditional batch version" }
+    private fun decodeRequestBody(reader: BinaryReader): Pair<List<KvCondition>, List<KvMutation>> {
         val conditionCount = reader.int()
         require(conditionCount in 0..ConditionalBatchRequest.MAX_ITEMS) { "Invalid condition count" }
         val conditions = List(conditionCount) {
@@ -177,7 +192,7 @@ object ConditionalBatchCodec {
     private const val OUTCOME_REJECTED: Byte = 2
 }
 
-private class BinaryWriter {
+internal class BinaryWriter {
     private var buffer = ByteArray(64)
     private var size = 0
 
@@ -219,7 +234,7 @@ private class BinaryWriter {
     }
 }
 
-private class BinaryReader(private val data: ByteArray) {
+internal class BinaryReader(private val data: ByteArray) {
     private var position = 0
 
     fun byte(): Byte {
@@ -257,6 +272,8 @@ private class BinaryReader(private val data: ByteArray) {
             throw IllegalArgumentException("Invalid UTF-8 in conditional batch data", cause)
         }
     }
+
+    val remaining: Int get() = data.size - position
 
     fun requireEnd() {
         require(position == data.size) { "Trailing bytes in conditional batch data" }

@@ -76,12 +76,20 @@ sealed interface KvMutation {
  * 同一性は厳密に比較される。同じ [requestId] でも内容が異なる要求は別要求として拒否される。
  * 全キーは一意でなければならない（条件同士・変更同士の重複は不正）。
  */
-class ConditionalBatchRequest(
+class ConditionalBatchRequest internal constructor(
     val principal: String,
     val requestId: String,
     conditions: List<KvCondition>,
     mutations: List<KvMutation>,
+    internal val mode: BatchMode,
 ) {
+    constructor(
+        principal: String,
+        requestId: String,
+        conditions: List<KvCondition>,
+        mutations: List<KvMutation>,
+    ) : this(principal, requestId, conditions, mutations, BatchMode.APPLY)
+
     val conditions: List<KvCondition> = conditions.toList()
     val mutations: List<KvMutation> = mutations.toList()
     private val digest: ByteArray
@@ -93,7 +101,7 @@ class ConditionalBatchRequest(
         require(requestId.isNotEmpty() && requestId.length <= MAX_IDENTITY_LENGTH) {
             "Request ID must be 1..$MAX_IDENTITY_LENGTH characters"
         }
-        require(mutations.isNotEmpty()) { "Conditional batch needs at least one mutation" }
+        require(mode != BatchMode.APPLY || mutations.isNotEmpty()) { "Conditional batch needs at least one mutation" }
         require(this.conditions.size <= MAX_ITEMS) { "Too many conditions: ${this.conditions.size}" }
         require(this.mutations.size <= MAX_ITEMS) { "Too many mutations: ${this.mutations.size}" }
         val conditionKeys = HashSet<ByteArrayKey>()
@@ -113,7 +121,7 @@ class ConditionalBatchRequest(
                 "Duplicate mutation key is not allowed"
             }
         }
-        digest = ConditionalBatchCodec.encodeRequestBody(this.conditions, this.mutations)
+        digest = ConditionalBatchCodec.encodeRequestBody(this.conditions, this.mutations, mode)
     }
 
     /** 正規化された要求本体（条件と変更）のバイト列。コピーを返す。 */
@@ -125,6 +133,7 @@ class ConditionalBatchRequest(
         if (other !is ConditionalBatchRequest) return false
         return principal == other.principal &&
             requestId == other.requestId &&
+            mode == other.mode &&
             conditions == other.conditions &&
             mutations == other.mutations
     }
@@ -132,6 +141,7 @@ class ConditionalBatchRequest(
     override fun hashCode(): Int {
         var result = principal.hashCode()
         result = 31 * result + requestId.hashCode()
+        if (mode != BatchMode.APPLY) result = 31 * result + mode.tag
         result = 31 * result + conditions.hashCode()
         result = 31 * result + mutations.hashCode()
         return result
@@ -159,3 +169,11 @@ class ConditionalBatchRequest(
 class UnsupportedCrossGroupBatchException(
     val rangeIds: Set<String>,
 ) : Exception("Conditional batch spans multiple groups: $rangeIds")
+
+internal enum class BatchMode(val tag: Byte) {
+    APPLY(1),
+    PREPARE(2),
+    COMMIT_PREPARED(3),
+}
+
+internal const val PREPARED_BATCH_SUFFIX = "/prepare"
