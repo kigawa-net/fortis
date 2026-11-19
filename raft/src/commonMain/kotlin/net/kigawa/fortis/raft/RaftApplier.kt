@@ -37,7 +37,9 @@ class RaftApplier(
                         stateMachine.apply(payload.command)
                     }
                 }
-                RaftLogEntryPayload.NoOp -> Unit
+                RaftLogEntryPayload.NoOp -> entry.garbageCollectionSafePoint?.let { safePoint ->
+                    (stateMachine as? StorageEngineStateMachine)?.compactBelowSafePoint(safePoint)
+                }
             }
             volatileState.lastApplied = index
             metrics?.incrementCounter(RaftMetrics.APPLIED_ENTRIES)

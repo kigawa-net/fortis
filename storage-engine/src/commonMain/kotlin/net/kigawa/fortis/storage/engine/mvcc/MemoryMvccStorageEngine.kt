@@ -111,14 +111,22 @@ class MemoryMvccStorageEngine : VersionedFortisStorageEngine {
     }
 
     override suspend fun compact(upToVersion: Long) = mutex.withLock {
-        compactLocked(upToVersion)
-    }
-
-    private fun compactLocked(upToVersion: Long) {
         val floor = pins.keys.minOrNull()
         require(floor == null || upToVersion < floor) {
             "compact($upToVersion) would destroy retained snapshot at version $floor"
         }
+        compactLocked(upToVersion)
+    }
+
+    /** Raft から指定された境界未満を圧縮する。対象の版が pin 中なら見送る。 */
+    suspend fun compactBelowSafePoint(safePoint: Long) = mutex.withLock {
+        if (safePoint <= 0) return@withLock
+        val upToVersion = minOf(latest, safePoint - 1)
+        if (upToVersion <= compactedFloor || pins.keys.any { it <= upToVersion }) return@withLock
+        compactLocked(upToVersion)
+    }
+
+    private fun compactLocked(upToVersion: Long) {
         for ((_, history) in histories) {
             val newer = history.filter { it.version > upToVersion }
             val older = history.filter { it.version <= upToVersion }
@@ -227,6 +235,29 @@ class MemoryMvccStorageEngine : VersionedFortisStorageEngine {
         issuedTimestamp = checkpoint.issuedTimestamp
         compactedFloor = checkpoint.compactedFloor
         staleIntents.addAll(checkpoint.uncommittedVersions)
+    }
+
+    /** Raft スナップショットで確定履歴と境界を置き換え、ローカルの pin と予約を破棄する。 */
+    suspend fun installCommittedSnapshot(
+        history: List<MvccHistoryRecord>,
+        floor: Long,
+        issuedTimestamp: Long,
+    ): Unit = mutex.withLock {
+        require(floor >= 0 && issuedTimestamp >= 0 && history.all { it.version in 1..issuedTimestamp }) {
+            "Invalid MVCC snapshot metadata"
+        }
+        histories.clear()
+        latest = 0
+        intents.clear()
+        staleIntents.clear()
+        pins.clear()
+        for (record in history) {
+            val value = record.value
+            if (value == null) removeLocked(record.key, record.version)
+            else addLocked(record.key.copyOf(), value.copyOf(), record.version)
+        }
+        this.issuedTimestamp = maxOf(this.issuedTimestamp, issuedTimestamp)
+        compactedFloor = floor
     }
 
     override suspend fun scanPrefixAt(

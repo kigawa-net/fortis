@@ -29,12 +29,13 @@ class CommandAppender(
     internal suspend fun append(
         payload: RaftLogEntryPayload,
         quorumProgress: suspend () -> List<RaftCommitQuorum>,
+    ): RaftLogEntry = append(quorumProgress) { index, term -> RaftLogEntry(index, term, payload) }
+
+    internal suspend fun append(
+        quorumProgress: suspend () -> List<RaftCommitQuorum>,
+        createEntry: (index: Long, term: Long) -> RaftLogEntry,
     ): RaftLogEntry {
-        val entry = RaftLogEntry(
-            index = log.lastIndex() + 1,
-            term = persistentState.currentTerm,
-            payload = payload,
-        )
+        val entry = createEntry(log.lastIndex() + 1, persistentState.currentTerm)
         log.append(entry)
 
         commitAdvancer.advanceQuorums(quorumProgress())

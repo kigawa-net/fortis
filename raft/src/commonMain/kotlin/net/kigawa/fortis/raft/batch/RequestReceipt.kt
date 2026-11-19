@@ -76,6 +76,11 @@ class RequestReceiptLedger {
         }
     }
 
+    internal fun replace(entries: List<RequestReceipt>) {
+        receipts.clear()
+        restore(entries)
+    }
+
     private data class ReceiptKey(val principal: String, val requestId: String)
 }
 

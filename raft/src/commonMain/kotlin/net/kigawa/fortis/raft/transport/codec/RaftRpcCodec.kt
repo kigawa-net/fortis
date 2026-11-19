@@ -1,6 +1,7 @@
 package net.kigawa.fortis.raft.transport.codec
 
 import net.kigawa.fortis.raft.RaftCommand
+import net.kigawa.fortis.raft.batch.BinaryWriter
 import net.kigawa.fortis.raft.batch.ConditionalBatchCodec
 import net.kigawa.fortis.raft.append.AppendEntriesRequest
 import net.kigawa.fortis.raft.append.AppendEntriesResponse
@@ -309,7 +310,7 @@ class RaftRpcCodec(
             is RaftCommand.Put -> command.key.size
             is RaftCommand.Delete -> command.key.size
             is RaftCommand.ConditionalBatch -> ConditionalBatchCodec.encode(command.request).size
-            null -> 0
+            null -> if (entry.garbageCollectionSafePoint == null) 0 else Long.SIZE_BYTES
         }
         val entrySize = 25L + keyLength + valueLength
         require(entrySize <= Int.MAX_VALUE) { "Raft RPC log entry is too large" }
@@ -346,8 +347,9 @@ class RaftRpcCodec(
             }
 
             RaftLogEntryPayload.NoOp -> {
-                commandType = NO_OP
-                key = byteArrayOf()
+                val safePoint = entry.garbageCollectionSafePoint
+                commandType = if (safePoint == null) NO_OP else COLLECT_GARBAGE
+                key = if (safePoint == null) byteArrayOf() else BinaryWriter().apply { long(safePoint) }.toByteArray()
                 value = null
             }
         }
@@ -586,7 +588,7 @@ class RaftRpcCodec(
         if (index <= 0) return EntryResult.Corrupted("Invalid log index: $index")
         if (term < 0) return EntryResult.Corrupted("Invalid log term: $term")
         if (commandType != PUT && commandType != DELETE && commandType != NO_OP &&
-            commandType != CONDITIONAL_BATCH
+            commandType != CONDITIONAL_BATCH && commandType != COLLECT_GARBAGE
         ) {
             return EntryResult.Corrupted("Unknown Raft command type: $commandType")
         }
@@ -604,6 +606,9 @@ class RaftRpcCodec(
                 return EntryResult.Corrupted("CONDITIONAL_BATCH command must not contain a value")
             }
         }
+        if (commandType == COLLECT_GARBAGE && (keyLength != Long.SIZE_BYTES || valueLength != -1)) {
+            return EntryResult.Corrupted("Invalid COLLECT_GARBAGE command payload")
+        }
         if (commandType == NO_OP && (keyLength != 0 || valueLength != -1)) {
             return EntryResult.Corrupted("NO_OP entry must not contain key or value")
         }
@@ -614,6 +619,10 @@ class RaftRpcCodec(
         val keyStart = start + MIN_ENTRY_SIZE
         val keyEnd = keyStart + keyLength
         val key = data.copyOfRange(keyStart, keyEnd)
+        if (commandType == COLLECT_GARBAGE) {
+            val entry = RaftLogEntry.collectGarbage(index, term, readLong(key, 0))
+            return EntryResult.Success(entry, entrySize.toInt())
+        }
         val payload = when (commandType) {
             PUT -> RaftLogEntryPayload.Command(
                 RaftCommand.Put(key, data.copyOfRange(keyEnd, keyEnd + valueLength)),
@@ -715,6 +724,7 @@ class RaftRpcCodec(
         private const val DELETE: Byte = 2
         private const val NO_OP: Byte = 3
         private const val CONDITIONAL_BATCH: Byte = 4
+        private const val COLLECT_GARBAGE: Byte = 5
         private val MAGIC = byteArrayOf(
             'F'.code.toByte(),
             'R'.code.toByte(),
