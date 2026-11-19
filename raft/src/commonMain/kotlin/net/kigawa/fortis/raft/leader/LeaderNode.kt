@@ -94,6 +94,12 @@ class LeaderNode(
             commandAppender.append(RaftLogEntryPayload.Command(command)) { quorumProgress(peerProgress) }
         }
 
+    internal suspend fun appendGarbageCollection(safePoint: Long): RaftLogEntry = mutex.withLock {
+        commandAppender.append({ quorumProgress(peerProgress) }) { index, term ->
+            RaftLogEntry.collectGarbage(index, term, safePoint)
+        }
+    }
+
     internal suspend fun refreshReplicationPeers(): Set<String> = mutex.withLock {
         refreshReplicationPeersLocked()
     }

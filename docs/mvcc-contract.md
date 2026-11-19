@@ -1,4 +1,4 @@
-# 単一 node の MVCC 契約（#21）
+# MVCC 契約（#21）
 
 この checkout の version store は `storage-engine/.../mvcc/MemoryMvccStorageEngine`。
 既存の `VersionedFortisStorageEngine` のメソッドは維持し、新しい操作は具象クラスに追加する。
@@ -24,8 +24,14 @@
 
 - `checkpoint()` は全履歴、適用済み最大版、発行済み counter、compaction floor、未確定予約の版を原子的に保存する。`restoreCheckpoint()` は空のエンジンへ復元する。これはメモリ上の状態転送 API であり、ディスク永続化は呼び出し側の責務。
 - 復旧時は旧プロセスの pin を持ち越さず、未確定予約はすべて stale として GC できる。未確定値は復元も公開もせず、counter は予約版を超えて継続する。checkpoint の配列を変更しても保存内容は変わらない。
-- 既存の Raft `StorageEngineStateMachine.snapshotData()` / `restoreSnapshot()` は確定履歴を再生し、キーの版と timestamp counter を再構築できることを統合テストで確認する。この従来形式にはローカルの予約 counter・未確定 intent・floor は含まれない。これらも保持するローカル復旧には checkpoint API を使う。
+- `StorageEngineStateMachine.snapshotData()` はメモリ MVCC の確定履歴（tombstone を含む）、受付記録、compaction floor、発行済み timestamp 上限を v2 に保存する。v1 は floor を 0 とし、確定履歴の最大版から timestamp を復元する。Raft スナップショットから復元する予約の情報は timestamp 上限のみ。
+- 永続化には `FileRaftSnapshotStore` を使う。`RaftRuntime.saveMvccSnapshot()` は適用済み index とデータを同じ排他区間で保存し、ログを圧縮する。再起動時は `RaftNodeBuilder.build` のスナップショット適用関数で `restoreSnapshot` を呼ぶ。受信側は `RaftRuntime` の適用関数で `installSnapshot` を呼び、適用済みの履歴と受付記録を置き換える。置き換え時にローカルの pin と予約は失効し、timestamp 発行済み上限はローカルとスナップショットの大きい値を保持する。
+
+## 複数レプリカでの GC と可視性
+
+- `RaftRuntime.proposeCollectGarbage()` はリーダーの GC 境界を決めてログに記録する。各レプリカは記録された境界未満を対象とし、確定履歴の最大版まで圧縮する。対象版にローカルの pin があるレプリカはその適用を見送り、pin の解放後に後続の GC 提案で追いつく。
+- 3 レプリカのテストで Put・Delete・GC の履歴と floor がリーダー交代後も一致し、PREPARE の変更が COMMIT まで `get` / `getAt` に現れないことを確認する。GC 後のスナップショットからの再起動と、遅延 follower への InstallSnapshot でも履歴と floor を検証する。
 
 ## 後課題
 
-複数 replica 間の timestamp 衝突回避、HLC／グローバル commit ordering、Raft 経由のローカル intent・version store の同期、および複数 replica の MVCC 検証は今回の対象外。現在の counter の保証範囲は単一エンジン（単一 node の version store）と、その checkpoint からの復旧である。
+#21 は残件 (1)(2)(3)(8) のため継続する。グループをまたぐ timestamp の衝突回避と HLC／グローバル commit ordering、ローカル write intent と版ストアの複製、レプリカの active read・transaction を考慮した GC 境界の調整が残る。ローカル counter の単調性はエンジン単位で保証する。

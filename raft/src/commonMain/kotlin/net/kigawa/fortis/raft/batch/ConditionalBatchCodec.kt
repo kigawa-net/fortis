@@ -11,6 +11,7 @@ import net.kigawa.fortis.storage.engine.mvcc.MvccHistoryRecord
 object ConditionalBatchCodec {
     private const val VERSION: Byte = 1
     private const val TRANSACTION_VERSION: Byte = 2
+    private const val MVCC_SNAPSHOT_VERSION: Byte = 2
     private const val CONDITION_ABSENT: Byte = 1
     private const val CONDITION_REVISION_EQUALS: Byte = 2
     private const val MUTATION_PUT: Byte = 3
@@ -120,9 +121,14 @@ object ConditionalBatchCodec {
     internal fun encodeSnapshot(
         history: List<MvccHistoryRecord>,
         receipts: List<RequestReceipt>,
+        mvcc: MvccSnapshotMetadata? = null,
     ): ByteArray {
         val writer = BinaryWriter()
-        writer.byte(VERSION)
+        writer.byte(if (mvcc == null) VERSION else MVCC_SNAPSHOT_VERSION)
+        if (mvcc != null) {
+            writer.long(mvcc.floor)
+            writer.long(mvcc.issuedTimestamp)
+        }
         writer.int(history.size)
         for (record in history) {
             writer.bytes(record.key)
@@ -156,14 +162,23 @@ object ConditionalBatchCodec {
         return writer.toByteArray()
     }
 
-    internal fun decodeSnapshot(data: ByteArray): Pair<List<MvccHistoryRecord>, List<RequestReceipt>> {
+    internal fun decodeSnapshot(data: ByteArray): StorageSnapshot {
         val reader = BinaryReader(data)
-        require(reader.byte() == VERSION) { "Unsupported conditional batch snapshot version" }
+        val mvcc = when (reader.byte()) {
+            VERSION -> null
+            MVCC_SNAPSHOT_VERSION -> MvccSnapshotMetadata(reader.long(), reader.long()).also {
+                require(it.floor >= 0 && it.issuedTimestamp >= 0) { "Invalid MVCC snapshot metadata" }
+            }
+            else -> throw IllegalArgumentException("Unsupported conditional batch snapshot version")
+        }
         val historyCount = reader.int()
-        require(historyCount >= 0) { "Invalid history count" }
+        require(historyCount in 0..reader.remaining / 13) { "Invalid history count" }
         val history = List(historyCount) {
             val key = reader.bytes()
             val version = reader.long()
+            require(version > 0 && (mvcc == null || version <= mvcc.issuedTimestamp)) {
+                "Invalid history version"
+            }
             val value = when (val present = reader.byte()) {
                 0.toByte() -> null
                 1.toByte() -> reader.bytes()
@@ -172,7 +187,7 @@ object ConditionalBatchCodec {
             MvccHistoryRecord(key, version, value)
         }
         val receiptCount = reader.int()
-        require(receiptCount >= 0) { "Invalid receipt count" }
+        require(receiptCount in 0..reader.remaining / 21) { "Invalid receipt count" }
         val receipts = List(receiptCount) {
             val principal = reader.string()
             val requestId = reader.string()
@@ -185,12 +200,23 @@ object ConditionalBatchCodec {
             RequestReceipt(principal, requestId, digest, outcome)
         }
         reader.requireEnd()
-        return history to receipts
+        require(receipts.distinctBy { it.principal to it.requestId }.size == receipts.size) {
+            "Duplicate snapshot receipt"
+        }
+        return StorageSnapshot(history, receipts, mvcc)
     }
 
     private const val OUTCOME_APPLIED: Byte = 1
     private const val OUTCOME_REJECTED: Byte = 2
 }
+
+internal data class MvccSnapshotMetadata(val floor: Long, val issuedTimestamp: Long)
+
+internal data class StorageSnapshot(
+    val history: List<MvccHistoryRecord>,
+    val receipts: List<RequestReceipt>,
+    val mvcc: MvccSnapshotMetadata?,
+)
 
 internal class BinaryWriter {
     private var buffer = ByteArray(64)

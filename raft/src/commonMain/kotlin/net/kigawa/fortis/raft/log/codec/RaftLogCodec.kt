@@ -1,6 +1,7 @@
 package net.kigawa.fortis.raft.log.codec
 
 import net.kigawa.fortis.raft.RaftCommand
+import net.kigawa.fortis.raft.batch.BinaryWriter
 import net.kigawa.fortis.raft.batch.ConditionalBatchCodec
 import net.kigawa.fortis.raft.log.RaftLogEntry
 import net.kigawa.fortis.raft.log.RaftLogEntryPayload
@@ -36,8 +37,9 @@ class RaftLogCodec(
             }
 
             RaftLogEntryPayload.NoOp -> {
-                commandType = NO_OP
-                key = byteArrayOf()
+                val safePoint = entry.garbageCollectionSafePoint
+                commandType = if (safePoint == null) NO_OP else COLLECT_GARBAGE
+                key = if (safePoint == null) byteArrayOf() else BinaryWriter().apply { long(safePoint) }.toByteArray()
                 value = null
             }
         }
@@ -95,7 +97,7 @@ class RaftLogCodec(
         }
         val commandType = data[offset + 21]
         if (commandType != PUT && commandType != DELETE && commandType != NO_OP &&
-            commandType != CONDITIONAL_BATCH
+            commandType != CONDITIONAL_BATCH && commandType != COLLECT_GARBAGE
         ) {
             return RaftLogDecodeResult.Corrupted(
                 "Unknown Raft command type: $commandType",
@@ -126,6 +128,9 @@ class RaftLogCodec(
             }
         }
 
+        if (commandType == COLLECT_GARBAGE && (keyLength != Long.SIZE_BYTES || valueLength != -1)) {
+            return RaftLogDecodeResult.Corrupted("Invalid COLLECT_GARBAGE entry payload")
+        }
         if (commandType == NO_OP && (keyLength != 0 || valueLength != -1)) {
             return RaftLogDecodeResult.Corrupted("NO_OP entry must not contain key or value")
         }
@@ -142,6 +147,10 @@ class RaftLogCodec(
         val keyStart = offset + headerSize
         val keyEnd = keyStart + keyLength
         val key = data.copyOfRange(keyStart, keyEnd)
+        if (commandType == COLLECT_GARBAGE) {
+            val entry = RaftLogEntry.collectGarbage(index, term, readLong(key, 0))
+            return RaftLogDecodeResult.Success(entry, recordSize.toInt())
+        }
         val payload = when (commandType) {
             PUT -> RaftLogEntryPayload.Command(
                 RaftCommand.Put(key, data.copyOfRange(keyEnd, keyEnd + valueLength)),
@@ -202,5 +211,6 @@ class RaftLogCodec(
         const val DELETE: Byte = 2
         const val NO_OP: Byte = 3
         const val CONDITIONAL_BATCH: Byte = 4
+        const val COLLECT_GARBAGE: Byte = 5
     }
 }

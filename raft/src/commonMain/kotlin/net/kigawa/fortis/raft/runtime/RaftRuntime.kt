@@ -16,6 +16,7 @@ import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 import net.kigawa.fortis.raft.RaftCommand
 import net.kigawa.fortis.raft.RaftStateMachine
+import net.kigawa.fortis.raft.StorageEngineStateMachine
 import net.kigawa.fortis.raft.append.AppendEntriesRequest
 import net.kigawa.fortis.raft.append.AppendEntriesResponse
 import net.kigawa.fortis.raft.candidate.CandidateNode
@@ -191,6 +192,15 @@ class RaftRuntime(
         saveSnapshotLocked(metadata, data)
     }
 
+    /**
+     * 適用済みの MVCC 状態を保存し、その index まで Raft ログを圧縮する。
+     * 再起動には [StorageEngineStateMachine.restoreSnapshot]、受信側には
+     * [StorageEngineStateMachine.installSnapshot] をスナップショット適用関数として設定する。
+     */
+    suspend fun saveMvccSnapshot(): SnapshotMetadata = saveAppliedSnapshot {
+        storageStateMachine(node).snapshotData()
+    }
+
     internal suspend fun saveAppliedSnapshot(encode: suspend () -> ByteArray): SnapshotMetadata = mutex.withLock {
         val index = node.volatileState.lastApplied
         check(index > 0) { "No applied Raft state to snapshot" }
@@ -300,7 +310,20 @@ class RaftRuntime(
      * Leadership loss fails a pending proposal, also without rolling back its entry.
      * [stop] fails pending proposals and prevents new proposal submissions.
      */
-    suspend fun propose(command: RaftCommand, timeout: Duration = 5.seconds): RaftLogEntry {
+    suspend fun propose(command: RaftCommand, timeout: Duration = 5.seconds): RaftLogEntry =
+        propose(timeout) { it.appendCommand(command) }
+
+    /** リーダーのメモリ MVCC で GC 境界を決め、Raft ログで提案する。 */
+    suspend fun proposeCollectGarbage(timeout: Duration = 5.seconds): RaftLogEntry =
+        propose(timeout) { leader -> leader.appendGarbageCollection(storageStateMachine(leader).gcSafePoint()) }
+
+    private fun storageStateMachine(node: RaftNode): StorageEngineStateMachine =
+        checkNotNull(node.stateMachine as? StorageEngineStateMachine) { "StorageEngineStateMachine required" }
+
+    private suspend fun propose(
+        timeout: Duration,
+        append: suspend (LeaderNode) -> RaftLogEntry,
+    ): RaftLogEntry {
         require(timeout.isPositive() && timeout.isFinite()) { "Proposal timeout must be positive and finite" }
         return withTimeout(timeout) {
             val completion = CompletableDeferred<RaftLogEntry>()
@@ -311,7 +334,7 @@ class RaftRuntime(
                         if (!completion.isActive || waiterJob?.isActive == false) return@launch
                         if (!proposalJob.isActive) throw RaftProposalStoppedException()
                         val leader = node as? LeaderNode ?: throw RaftProposalNotLeaderException()
-                        val entry = leader.appendCommand(command)
+                        val entry = append(leader)
                         logger.debug(
                             RaftLogEvents.COMPONENT_RUNTIME,
                             RaftLogEvents.COMMAND_APPENDED,

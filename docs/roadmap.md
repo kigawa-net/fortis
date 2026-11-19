@@ -12,7 +12,7 @@
 | --- | --- | --- | --- |
 | 1 | — | Storage 基盤 | 完了 |
 | 2 | #18 / #17 / #26 | Raft 基盤 / Snapshot 回復 / CI | ほぼ完了（#17 完了） |
-| 3 | #21 | MVCC・版付き KV・snapshot read | 単一ノードで完了 |
+| 3 | #21 | MVCC・版付き KV・snapshot read | 単一ノードで完了、複数レプリカは一部実装済み |
 | 4 | #22 | Range Sharding・Multi-Raft・Routing | 複数レンジで実装済み |
 | 5 | #23 | Meta Raft・Membership・配置・Rebalance | Meta Raft・昇格・移動計画を実装済み（実データ移動は未実装） |
 | 6 | #24 | KV Transaction・Cross-Shard 2PC・Recovery | 固定レンジ構成で 2PC・クラッシュ復旧まで実装済み |
@@ -33,11 +33,12 @@
 - #17（PR #69）完了。Snapshot 永続化、単一メッセージ／チャンクでの InstallSnapshot、base-index 前方圧縮、snapshot とログによる再起動復旧を実装。詳細は `docs/architecture.md` のスナップショット節を参照。
   - 従来の単一メッセージ形式・未圧縮ログ・版1スナップショットとの読み取り互換性を維持。
 
-### Phase 3 — MVCC (#21): 単一ノードで完了
+### Phase 3 — MVCC (#21): 複数レプリカは一部実装済み
 
 - PR #70 で単調増加する timestamp の発行、write intent の予約・確定・破棄、版ベースの競合検出、pin と GC safe point に基づく version GC・stale intent GC を実装。
-- ローカル checkpoint は未確定の予約版を stale として復元する。Raft snapshot からは確定版と timestamp カウンターを再構築する。[MVCC 契約](mvcc-contract.md)
-- 残件は複数レプリカでの timestamp 衝突回避と順序付け（HLC を含む）、Raft による版ストアの同期と MVCC の検証。
+- ローカル checkpoint は未確定の予約版を stale として復元する。Raft では GC 境界を複製し、永続スナップショット v2 で確定履歴・floor・発行済み timestamp 上限・受付記録を復元する。v1 の読み取りにも対応する。[MVCC 契約](mvcc-contract.md)
+- 3 レプリカで履歴と floor の一致、リーダー交代、PREPARE の非露出、GC 後の再起動と InstallSnapshot を検証した。
+- #21 の残件 (1)(2)(3)(8) は timestamp 衝突回避と順序付け（HLC を含む）、ローカル write intent と版ストアの複製、レプリカ間の GC 境界の調整。
 
 ### Phase 4 — Range Sharding (#22): 複数レンジで実装済み
 
@@ -88,7 +89,7 @@
 
 ## 優先順位（現状に合わせた次の順序案）
 
-1. #21 の残件。複数レプリカでの timestamp・順序付け、版ストア同期と MVCC 検証。
+1. #21 の残件。timestamp・commit ordering、ローカル intent と版ストアの複製、レプリカ間の GC 境界の調整。
 2. #22・#23 の残件。Meta Raft とルーティングの連携、レプリカの実データ移動と旧 voter の除外、split 時のルーティング切替。
 3. #24 の残件。レンジ再構成との連携、確定処理の並列化、トランザクション記録の GC。
 4. #25 の残件。本番セキュリティ、障害試験、性能測定、運用手順。安全性に関わる作業は並行して進める。
